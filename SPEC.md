@@ -24,7 +24,7 @@ greeting <- "Hi " who:[a-zA-Z]+
 }
 ```
 
-Expressions: string literals, character classes/ranges/inversion, `.`, rule references, sequences, ordered `/` choice, grouping, `*`, `+`, `?`, negative `!` and positive `&` lookahead, named captures `name:expression`. Capture applies to the following suffixed expression, so `name:[a-z]+` captures the whole word. `#` comments and multiline rules supported. Top-level `root NAME` selects the required entry rule. Matching is byte-oriented on UTF-8 input; source columns are byte columns. Unicode literals work; classes/dot match bytes, not Unicode code points. No regex engine or host-language actions.
+Expressions: string literals, character classes/ranges/inversion with `\xHH` byte escapes, `.`, rule references, sequences, ordered `/` choice, grouping, `*`, `+`, `?`, negative `!` and positive `&` lookahead, named captures `name:expression`. Capture applies to the following suffixed expression, so `name:[a-z]+` captures the whole word. `#` comments and multiline rules supported. Top-level `root NAME` selects the required entry rule. Matching is byte-oriented on UTF-8 input; source columns are byte columns. Unicode literals work; classes/dot match bytes, not Unicode code points. No regex engine or host-language actions.
 
 Without captures, matching returns matched text. In sequences, captures discard uncaptured text; adjacent capture objects merge, with later duplicate keys winning. Repetitions with captured items produce arrays, including singleton arrays. A sequence combining capture objects and arrays flattens them into an array of structured items. Empty uncaptured matches produce an empty string. These are Parslet-inspired rules, not a promise of bug-for-bug Elixir/Ruby compatibility.
 
@@ -42,7 +42,16 @@ Test blocks use relaxed JSON values, with bare object keys and optional commas. 
 
 Object patterns match exact keys. Patterns also support arrays, scalar literals, `simple(name)` for scalar values, `sequence(name)` for arrays of scalars, and `subtree(name)` for any value. Repeated bindings must be deeply equal. Children transform before parents, then the first matching rule applies once; replacement values are not traversed again. Unmatched nodes are unchanged.
 
-Output expressions support bindings, literals, arrays, objects and `concat`, `join`, `int`, `float`, `bool`. Numeric literals follow JSON number syntax; conversion functions retain their separate string-conversion semantics. No arbitrary code. Unknown variables/functions and malformed rules are diagnosed. Invalid conversions fail, not silently coerce to zero.
+Output expressions support bindings, literals, arrays, objects and `concat`, `join`, `int`, `float`, `bool`, `unquote`, `number`, `pluck`, `from_entries`. Numeric literals follow JSON number syntax; conversion functions retain their separate string-conversion semantics. No arbitrary code. Unknown variables/functions and malformed rules are diagnosed. Invalid conversions fail, not silently coerce to zero.
+
+New JSON-oriented helpers:
+
+- `unquote(text)` decodes exactly one quoted JSON string token, allowing surrounding JSON whitespace. Reject arrays and all other non-string JSON values.
+- `number(text)` validates JSON number syntax and returns a numeric token without rounding or changing its spelling. Library representation is `std.json.Value.number_string`. Explicit int/float conversions accept it and enforce their existing limits.
+- `pluck(array, key)` requires an array of objects and a string key. Missing keys and non-object elements are errors; arbitrary selected values are preserved.
+- `from_entries(array)` requires exact `{key: STRING, value: ANY}` entries. It creates an object, with the last value winning for duplicate keys. Empty input creates an empty object.
+
+All helper names and arities are validated when loading rules. Replacement values are not re-transformed. The JSON example retains entry/element wrappers until container reduction to avoid confusing singleton nested containers or user keys with parser tags.
 
 ## Internal interfaces
 

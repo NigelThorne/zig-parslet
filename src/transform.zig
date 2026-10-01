@@ -208,9 +208,12 @@ fn validateOutput(parser: *Parser, node: *Node, names: *const std.StringHashMap(
         .call => |call| {
             const is_join = std.mem.eql(u8, call.name, "join");
             const is_conversion = std.mem.eql(u8, call.name, "int") or std.mem.eql(u8, call.name, "float") or std.mem.eql(u8, call.name, "bool");
-            if (!(std.mem.eql(u8, call.name, "concat") or is_join or is_conversion)) return parser.fail(node.offset, "unknown output function");
+            const is_unary = is_conversion or std.mem.eql(u8, call.name, "unquote") or std.mem.eql(u8, call.name, "number") or std.mem.eql(u8, call.name, "from_entries");
+            const is_pluck = std.mem.eql(u8, call.name, "pluck");
+            if (!(std.mem.eql(u8, call.name, "concat") or is_join or is_unary or is_pluck)) return parser.fail(node.offset, "unknown output function");
             if (is_join and (call.args.len < 1 or call.args.len > 2)) return parser.fail(node.offset, "join expects one or two arguments");
-            if (is_conversion and call.args.len != 1) return parser.fail(node.offset, "conversion expects one argument");
+            if (is_unary and call.args.len != 1) return parser.fail(node.offset, "output function expects one argument");
+            if (is_pluck and call.args.len != 2) return parser.fail(node.offset, "pluck expects two arguments");
             for (call.args) |arg| try validateOutput(parser, arg, names, depth + 1);
         },
     }
@@ -329,8 +332,48 @@ fn evaluateCall(allocator: std.mem.Allocator, offset: usize, call: Call, binding
         }
         return .{ .string = try out.toOwnedSlice(allocator) };
     }
-    if (call.args.len != 1) return runtimeFail(diagnostic, offset, "conversion requires one argument", error.InvalidTransform);
+    if (std.mem.eql(u8, call.name, "pluck")) {
+        const value = try evaluate(allocator, call.args[0], bindings, diagnostic, depth);
+        const key = try evaluate(allocator, call.args[1], bindings, diagnostic, depth);
+        if (value != .array or key != .string) return runtimeFail(diagnostic, offset, "pluck expects an array and string key", error.InvalidTransform);
+        var out = std.json.Array.init(allocator);
+        for (value.array.items) |item| {
+            if (item != .object) return runtimeFail(diagnostic, offset, "pluck array must contain objects", error.InvalidTransform);
+            const selected = item.object.get(key.string) orelse return runtimeFail(diagnostic, offset, "pluck key is missing", error.InvalidTransform);
+            try out.append(selected);
+        }
+        return .{ .array = out };
+    }
+    if (std.mem.eql(u8, call.name, "from_entries")) {
+        const value = try evaluate(allocator, call.args[0], bindings, diagnostic, depth);
+        if (value != .array) return runtimeFail(diagnostic, offset, "from_entries expects an array", error.InvalidTransform);
+        var out: std.json.ObjectMap = .{};
+        for (value.array.items) |item| {
+            if (item != .object or item.object.count() != 2) return runtimeFail(diagnostic, offset, "from_entries array must contain exact key/value objects", error.InvalidTransform);
+            const key = item.object.get("key") orelse return runtimeFail(diagnostic, offset, "from_entries entry requires key", error.InvalidTransform);
+            const entry_value = item.object.get("value") orelse return runtimeFail(diagnostic, offset, "from_entries entry requires value", error.InvalidTransform);
+            if (key != .string) return runtimeFail(diagnostic, offset, "from_entries keys must be strings", error.InvalidTransform);
+            try out.put(allocator, key.string, entry_value);
+        }
+        return .{ .object = out };
+    }
     const value = try evaluate(allocator, call.args[0], bindings, diagnostic, depth);
+    if (std.mem.eql(u8, call.name, "unquote")) {
+        if (value != .string) return runtimeFail(diagnostic, offset, "unquote expects a string", error.InvalidTransform);
+        const token = std.mem.trim(u8, value.string, " \t\r\n");
+        // Zig's []const u8 JSON decoder also accepts integer arrays. This helper
+        // deliberately accepts only a quoted string token, never a byte array.
+        if (token.len < 2 or token[0] != '"') return runtimeFail(diagnostic, offset, "expected a quoted JSON string", error.InvalidTransform);
+        const decoded = std.json.parseFromSliceLeaky([]const u8, allocator, token, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return runtimeFail(diagnostic, offset, "invalid quoted JSON string", error.InvalidTransform),
+        };
+        return .{ .string = decoded };
+    }
+    if (std.mem.eql(u8, call.name, "number")) {
+        if (value != .string or !numbers.isLiteral(value.string)) return runtimeFail(diagnostic, offset, "number expects a JSON number string", error.InvalidTransform);
+        return .{ .number_string = value.string };
+    }
     if (std.mem.eql(u8, call.name, "int")) return toInt(value) catch return runtimeFail(diagnostic, offset, "invalid integer conversion", error.InvalidTransform);
     if (std.mem.eql(u8, call.name, "float")) return toFloat(value) catch return runtimeFail(diagnostic, offset, "invalid float conversion", error.InvalidTransform);
     return toBool(value) catch return runtimeFail(diagnostic, offset, "invalid boolean conversion", error.InvalidTransform);
@@ -346,6 +389,7 @@ fn toInt(value: std.json.Value) !std.json.Value {
         .integer => value,
         .float => |v| if (std.math.isFinite(v) and @floor(v) == v and v >= -0x1p63 and v < 0x1p63) .{ .integer = @intFromFloat(v) } else error.InvalidConversion,
         .string => |v| .{ .integer = try std.fmt.parseInt(i64, v, 10) },
+        .number_string => |v| .{ .integer = try std.fmt.parseInt(i64, v, 10) },
         else => error.InvalidConversion,
     };
 }
@@ -355,6 +399,7 @@ fn toFloat(value: std.json.Value) !std.json.Value {
         .float => |v| v,
         .integer => |v| @floatFromInt(v),
         .string => |v| try std.fmt.parseFloat(f64, v),
+        .number_string => |v| try std.fmt.parseFloat(f64, v),
         else => return error.InvalidConversion,
     };
     if (!std.math.isFinite(number)) return error.InvalidConversion;

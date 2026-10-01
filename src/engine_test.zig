@@ -208,6 +208,21 @@ test "character classes and strings decode escapes without silent corruption" {
     try std.testing.expectError(error.InvalidGrammar, engine.compile(a, "root a\na <- \"\\q\"", false, &bad_escape));
 }
 
+test "character classes support exact hex byte escapes and ranges" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const grammar = try compileOk(a, "root r\nr <- [\\x00-\\x1f] [\\x80-\\xFF] [\\x2d]", false);
+    try std.testing.expect((try engine.parse(a, &grammar, &.{ 0, 128, '-' }, false)).diagnostic == null);
+    const invalid = [_][]const u8{ "[\\x]", "[\\x0]", "[\\xGG]", "[\\x+f]", "[\\xff-\\x00]" };
+    for (invalid) |class| {
+        const source = try std.fmt.allocPrint(a, "root r\nr <- {s}", .{class});
+        var diagnostic: ?@import("common.zig").Diagnostic = null;
+        try std.testing.expectError(error.InvalidGrammar, engine.compile(a, source, false, &diagnostic));
+        try std.testing.expect(diagnostic != null);
+    }
+}
+
 test "hyphen at either edge of a character class is literal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

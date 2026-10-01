@@ -1,0 +1,15 @@
+# Scalars reduce first. number() preserves the exact numeric token.
+{ json_string: simple(s) } => unquote(s)
+{ json_number: simple(n) } => number(n)
+{ json_boolean: simple(b) } => bool(b)
+{ json_null: "null" } => null
+
+# Keep element/entry wrappers until their container reduces.
+# This distinguishes [1], [[1]], [] and arrays containing arbitrary objects.
+{ json_empty_array: "" } => []
+{ json_array: { element: subtree(v) } } => [v]
+{ json_array: subtree(items) } => pluck(items, "element")
+
+{ json_empty_object: "" } => {}
+{ json_object: { entry: { key: simple(k), value: subtree(v) } } } => from_entries([{ key: k, value: v }])
+{ json_object: subtree(entries) } => from_entries(pluck(entries, "entry"))

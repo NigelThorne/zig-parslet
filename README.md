@@ -44,6 +44,18 @@ mise exec -- zig build -Doptimize=ReleaseSafe --prefix "$HOME/.local"
 
 Use `mise exec -- zig`, not an unrelated Zig version on PATH.
 
+## JSON round trip
+
+```sh
+./zig-out/bin/peg_test examples/json.peg
+./zig-out/bin/peg_parse examples/json.peg examples/json.json |
+  ./zig-out/bin/peg_transform examples/json.pegtx
+```
+
+The grammar parses JSON into a capture tree. The transform then decodes strings, converts scalar values and builds arrays and objects. It handles empty/singleton/nested containers, escaped keys, Unicode and precise numbers. Numeric tokens retain their original spelling, including large integers and long decimals. Duplicate object keys use the last value.
+
+This example validates UTF-8 and requires paired UTF-16 surrogate escapes. It rejects raw controls, malformed escapes, invalid numbers and trailing commas. It uses explicit byte ranges for Unicode validation; the PEG engine itself remains byte-oriented. The normal parser depth/work limits still apply.
+
 ## Commands
 
 | Command | Input | Output |
@@ -84,6 +96,7 @@ Rules start on their own line and can span multiple lines. Whitespace in the gra
 | --- | --- |
 | `"text"`, `'text'` | Literal text |
 | `[a-z0-9]`, `[^"]` | Byte class, or inverted class |
+| `[\\x00-\\x1f]` | Hex byte range, exactly two hex digits per escape |
 | `.` | Any byte |
 | `name` | Rule reference |
 | `a b` | Sequence |
@@ -160,7 +173,7 @@ Children transform before their parent. At each node, the **first matching rule*
 | `[pattern, pattern]` | Array of exactly that length |
 | `"text"`, `42`, `true`, `null` | Literal value |
 
-Repeated binding names require equal values. For example, `{ left: simple(x), right: simple(x) }` only matches when both sides are equal. Number equality is representation-sensitive: an integer literal does not match a floating-point value.
+Repeated binding names require equal values. For example, `{ left: simple(x), right: simple(x) }` only matches when both sides are equal. Number equality is representation-sensitive: an integer literal does not match a floating-point value or a token-preserving `number()` result. Use `int()` or `float()` when you need those numeric representations.
 
 Output expressions can use bound names, literals, arrays, objects and these functions:
 
@@ -171,6 +184,12 @@ Output expressions can use bound names, literals, arrays, objects and these func
 | `int(value)` | Signed 64-bit integer; rejects fractional or out-of-range values |
 | `float(value)` | Finite double-precision number |
 | `bool(value)` | Boolean, or conversion of `"true"`/`"false"` |
+| `unquote(text)` | Decode one complete quoted JSON string, including escapes |
+| `number(text)` | Validate a JSON numeric token and emit it unchanged as a number |
+| `pluck(array, key)` | Extract a named field from each object, preserving order |
+| `from_entries(array)` | Build an object from exact `{key: string, value: any}` entries |
+
+`pluck` rejects missing keys or non-object elements. `from_entries` rejects malformed entries, returns `{}` for an empty array and keeps the last value for duplicate keys. Neither operation changes its input. `unquote` rejects arrays, objects and other non-string JSON values; it does not parse whole JSON documents. `number` preserves precision rather than converting through a floating-point value. Explicit `int(number(...))` and `float(number(...))` conversions still enforce their normal limits.
 
 Transform strings use JSON escapes, including Unicode escapes. Numeric literals follow JSON number syntax, including signed exponents such as `1e+2`. Object fields and function arguments require commas. `#` starts a comment. Unknown bindings/functions are errors even when their rule would not match. Rules cannot run host-language code.
 
@@ -195,7 +214,7 @@ mise exec -- zig build
 python3 tests/cli_test.py
 ```
 
-The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. No Python package installation is needed.
+The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. JSON round trips include a reproducible 60-document generated corpus checked against Python's JSON decoder, plus malformed document, Unicode and exact numeric-token cases. No Python package installation is needed.
 
 ## Library
 

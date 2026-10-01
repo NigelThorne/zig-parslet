@@ -98,6 +98,92 @@ test "unused invalid rules are rejected with transform diagnostics" {
     }
 }
 
+test "new output helpers transform strings numbers arrays and entries" {
+    try run("{ x: simple(v) } => unquote(v)", "{\"x\":\"\\\"line\\\\n\\\\uD83D\\\\uDE00\\\"\"}", "\"line\\n😀\"");
+    try run("{ x: subtree(v) } => pluck(v, \"dynamic-key\")", "{\"x\":[{\"dynamic-key\":1},{\"dynamic-key\":{\"nested\":[true]}}]}", "[1,{\"nested\":[true]}]");
+    try run("{ x: subtree(v) } => pluck(v, \"key\")", "{\"x\":[]}", "[]");
+    try run("{ x: subtree(v) } => from_entries(v)", "{\"x\":[{\"key\":\"a\",\"value\":1},{\"key\":\"a\",\"value\":{\"nested\":true}},{\"key\":\"any key\",\"value\":[]}]}", "{\"a\":{\"nested\":true},\"any key\":[]}");
+    try run("{ x: subtree(v) } => from_entries(v)", "{\"x\":[]}", "{}");
+}
+
+test "number preserves the original lexeme when serialized" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const lexeme = "123456789012345678901234567890.123456789e+40";
+    const input = try parseJson(allocator, "{\"x\":\"123456789012345678901234567890.123456789e+40\"}");
+    var diagnostic: ?common.Diagnostic = null;
+    const actual = try transform.apply(allocator, "{ x: simple(v) } => number(v)", input, &diagnostic);
+    const serialized = try std.json.Stringify.valueAlloc(allocator, actual, .{});
+    try std.testing.expectEqualStrings(lexeme, serialized);
+}
+
+test "number strings convert explicitly with bounded int and float conversions" {
+    try run("{ x: simple(v) } => int(number(v))", "{\"x\":\"42\"}", "42");
+    try run("{ x: simple(v) } => float(number(v))", "{\"x\":\"2.5e1\"}", "25.0");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var diagnostic: ?common.Diagnostic = null;
+    const input = try parseJson(allocator, "{\"x\":\"9223372036854775808\"}");
+    try std.testing.expectError(error.InvalidTransform, transform.apply(allocator, "{ x: simple(v) } => int(number(v))", input, &diagnostic));
+}
+
+test "replacement values are not transformed again" {
+    try run(
+        \\{ x: simple(v) } => { generated: unquote(v) }
+        \\{ generated: subtree(v) } => "wrong"
+    , "{\"x\":\"\\\"ok\\\"\"}", "{\"generated\":\"ok\"}");
+}
+
+test "new output helper names and arity are validated before matching" {
+    const cases = [_][]const u8{
+        "{ x: 1 } => unquote()",
+        "{ x: 1 } => number(\"1\", \"2\")",
+        "{ x: 1 } => pluck([])",
+        "{ x: 1 } => pluck([], \"key\", \"extra\")",
+        "{ x: 1 } => from_entries([], [])",
+    };
+    for (cases) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var diagnostic: ?common.Diagnostic = null;
+        try std.testing.expectError(error.InvalidTransformRules, transform.apply(allocator, source, .null, &diagnostic));
+        try std.testing.expectEqual(common.Diagnostic.Kind.transform, diagnostic.?.kind);
+    }
+}
+
+test "new output helpers reject invalid syntax and argument types without partial results" {
+    const Case = struct { source: []const u8, input: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "{ x: subtree(v) } => unquote(v)", .input = "{\"x\":1}" },
+        .{ .source = "{ x: simple(v) } => unquote(v)", .input = "{\"x\":\"true\"}" },
+        .{ .source = "{ x: simple(v) } => unquote(v)", .input = "{\"x\":\"\\\"a\\\" trailing\"}" },
+        .{ .source = "{ x: subtree(v) } => number(v)", .input = "{\"x\":false}" },
+        .{ .source = "{ x: simple(v) } => number(v)", .input = "{\"x\":\"01\"}" },
+        .{ .source = "{ x: subtree(v) } => pluck(v, \"k\")", .input = "{\"x\":{}}" },
+        .{ .source = "{ x: subtree(v) } => pluck(v, \"k\")", .input = "{\"x\":[{\"k\":1},2]}" },
+        .{ .source = "{ x: subtree(v) } => pluck(v, \"k\")", .input = "{\"x\":[{\"k\":1},{}]}" },
+        .{ .source = "{ x: subtree(v) } => pluck(v, 1)", .input = "{\"x\":[]}" },
+        .{ .source = "{ x: subtree(v) } => from_entries(v)", .input = "{\"x\":{}}" },
+        .{ .source = "{ x: subtree(v) } => from_entries(v)", .input = "{\"x\":[{\"key\":\"a\",\"value\":1},{\"key\":\"b\"}]}" },
+        .{ .source = "{ x: subtree(v) } => from_entries(v)", .input = "{\"x\":[{\"key\":1,\"value\":2}]}" },
+        .{ .source = "{ x: subtree(v) } => from_entries(v)", .input = "{\"x\":[{\"key\":\"a\",\"value\":1,\"extra\":2}]}" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var diagnostic: ?common.Diagnostic = null;
+        const input = try parseJson(allocator, case.input);
+        try std.testing.expectError(error.InvalidTransform, transform.apply(allocator, case.source, input, &diagnostic));
+        try std.testing.expectEqual(common.Diagnostic.Kind.transform, diagnostic.?.kind);
+        try std.testing.expect(diagnostic.?.offset < case.source.len);
+    }
+}
+
 test "type errors report the expression source offset" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

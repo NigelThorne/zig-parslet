@@ -1,0 +1,16 @@
+{
+  "service": "Zig Parslet",
+  "enabled": true,
+  "retry_count": 3,
+  "threshold": 0.123456789012345678901234567890,
+  "large_integer": 1234567890123456789012345678901234567890,
+  "description": "Line one\nLine two with a \"quote\" and a \\backslash",
+  "unicode": "café 😀",
+  "escaped_unicode": "\u263a \ud83d\ude00",
+  "empty": { "array": [], "object": {}, "string": "", "nothing": null },
+  "records": [
+    { "name": "first", "values": [1, 2, 3] },
+    { "name": "second", "values": [[true], [false, null]] }
+  ],
+  "capture_like_keys": { "json_number": "plain user text", "element": "not a parser node" }
+}

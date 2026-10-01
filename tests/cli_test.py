@@ -2,6 +2,7 @@
 """Black-box acceptance tests. Build first: mise exec -- zig build."""
 import json
 import pathlib
+import random
 import subprocess
 import tempfile
 import unittest
@@ -355,6 +356,92 @@ class CliTests(unittest.TestCase):
         clean = self.run_cli("peg_transform", ROOT / "examples/email.pegtx", data=result.stdout)
         self.assertEqual(clean.returncode, 0, clean.stderr)
         self.assertEqual(json.loads(clean.stdout), "a.b@gmail.com")
+
+    def test_unquote_rejects_json_byte_arrays(self):
+        rules = self.file("r.pegtx", '{ x: simple(v) } => unquote(v)')
+        for value in ('[65]', '[65,66]', '[]', '{}', 'true', '42', 'null'):
+            with self.subTest(value=value):
+                result = self.run_cli("peg_transform", rules, data=json.dumps({"x": value}))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("JSON string", result.stderr)
+
+    def json_round_trip(self, document):
+        parsed = self.run_cli("peg_parse", ROOT / "examples/json.peg", data=document)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        transformed = self.run_cli("peg_transform", ROOT / "examples/json.pegtx", data=parsed.stdout)
+        self.assertEqual(transformed.returncode, 0, transformed.stderr)
+        return transformed.stdout
+
+    def test_json_round_trip_values_and_containers(self):
+        documents = [
+            'null', 'true', 'false', '0', '-42', '3.125', '1e+3',
+            '""', '"hello"', '[]', '{}', '[1]', '[[1]]', '[[[]]]',
+            '[{}, [], [1, 2], {"nested": [false, null]}]',
+            '{"single": [1]}', '{"a":1,"b":2}',
+            '{"key\\n": "line\\nquote\\\"slash\\\\tab\\t"}',
+            '{"é": "😀", "escaped": "\\ud83d\\ude00"}',
+            '{"duplicate": 1, "duplicate": 2}',
+            '{"json_number":"not a number","json_array":{"element":1},"json_empty_array":"","entry":{"key":"x","value":3}}',
+        ]
+        for document in documents:
+            with self.subTest(document=document):
+                output = self.json_round_trip(document)
+                self.assertEqual(json.loads(output), json.loads(document))
+
+    def test_json_round_trip_preserves_number_tokens(self):
+        for number in ('-0', '1234567890123456789012345678901234567890',
+                       '0.123456789012345678901234567890', '1e400', '1e-400', '1E+003'):
+            with self.subTest(number=number):
+                self.assertEqual(self.json_round_trip(number).strip(), number)
+
+    def test_json_unicode_boundaries_and_escaped_controls(self):
+        codepoints = [0x20, 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xffff, 0x10000, 0x10ffff]
+        value = {"nul\x00key": "\x00\b\f\n\r\t", "boundaries": "".join(map(chr, codepoints))}
+        for ascii_only in (True, False):
+            document = json.dumps(value, ensure_ascii=ascii_only)
+            self.assertEqual(json.loads(self.json_round_trip(document)), value)
+
+    def test_json_generated_corpus_matches_python(self):
+        rng = random.Random(87213)
+        scalars = [None, True, False, 0, -1, 2**80, 3.125, "", "text", "é😀", "line\n", "\\\""]
+        def value(depth):
+            kind = rng.randrange(3) if depth else 0
+            if kind == 0:
+                return rng.choice(scalars)
+            if kind == 1:
+                return [value(depth - 1) for _ in range(rng.randrange(4))]
+            return {key: value(depth - 1) for key in rng.sample(["a", "b", "json_number", "line\n", "😀"], rng.randrange(4))}
+        for index in range(60):
+            expected = value(3)
+            document = json.dumps(expected, ensure_ascii=index % 2 == 0, indent=2 if index % 3 == 0 else None)
+            with self.subTest(index=index, document=document):
+                self.assertEqual(json.loads(self.json_round_trip(document)), expected)
+
+    def test_json_rejects_malformed_documents(self):
+        documents = ['', '[1,]', '{"a":1,}', '[1 2]', '{"a" 1}',
+                     '{a:1}', '01', '-01', '+1', '1.', '.1', '1e', '1e+',
+                     'NaN', 'Infinity', 'true false', '/*comment*/null',
+                     '"bad\\q"', '"\\uZZZZ"', '"\\ud800"', '"\\udc00"',
+                     '"\\ud800\\u0041"', '"line\nfeed"', '"nul\x00byte"']
+        for document in documents:
+            with self.subTest(document=document):
+                result = self.run_cli("peg_parse", "--json", ROOT / "examples/json.peg", data=document)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                error = json.loads(result.stdout)["error"]
+                self.assertEqual(error["kind"], "input")
+                self.assertTrue(error["message"])
+
+    def test_json_rejects_invalid_utf8_in_strings(self):
+        for raw in (b'"\x80"', b'"\xc0\xaf"', b'"\xed\xa0\x80"', b'"\xf4\x90\x80\x80"', b'"\xe2\x82"'):
+            result = subprocess.run([str(BIN / "peg_parse"), "--json", str(ROOT / "examples/json.peg")],
+                                    input=raw, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["error"]["kind"], "input")
+
+    def test_json_example_document_round_trip(self):
+        document = (ROOT / "examples/json.json").read_text()
+        self.assertEqual(json.loads(self.json_round_trip(document)), json.loads(document))
 
     def test_shipped_embedded_tests(self):
         grammars = sorted((ROOT / "examples").glob("*.peg"))

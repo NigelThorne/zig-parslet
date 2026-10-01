@@ -185,6 +185,13 @@ const GrammarParser = struct {
             ']' => ']',
             '-' => '-',
             '\\' => '\\',
+            'x' => blk: {
+                const escape_at = self.pos - 2;
+                if (self.pos + 2 > self.source.len or !std.ascii.isHex(self.source[self.pos]) or !std.ascii.isHex(self.source[self.pos + 1])) return self.fail(escape_at, "hex byte escape requires two hex digits");
+                const byte = std.fmt.parseInt(u8, self.source[self.pos .. self.pos + 2], 16) catch unreachable;
+                self.pos += 2;
+                break :blk byte;
+            },
             else => return self.fail(self.pos - 2, "unknown character class escape"),
         }, .escaped = true };
     }
