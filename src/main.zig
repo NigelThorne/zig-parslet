@@ -64,6 +64,8 @@ const Context = struct {
                 .rule = problem_value.rule,
                 .grammar_source = if (grammar_loc != null) grammar_name else null,
                 .grammar_location = grammar_loc,
+                .expected = problem_value.expected,
+                .expected_truncated = problem_value.expected_truncated,
             }, .trace = if (author) self.events else &.{} });
             return;
         }
@@ -75,6 +77,11 @@ const Context = struct {
             if (problem_value.grammar_offset) |offset| {
                 try output.writer.writeAll("grammar expression:\n");
                 try output.writer.writeAll(try diag.highlight(self.allocator, grammar_name, grammar_source, offset));
+            }
+            for (problem_value.expected) |expected| {
+                if (problem_value.grammar_offset == expected.grammar_offset) continue;
+                try output.writer.print("alternative: {s}\n", .{try diag.escape(self.allocator, expected.message)});
+                try output.writer.writeAll(try diag.highlight(self.allocator, grammar_name, grammar_source, expected.grammar_offset));
             }
         }
         try self.emit(output.written(), !is_test);

@@ -74,6 +74,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("^", result.stderr)
         self.assertIn("1:9", result.stderr)
+        result = self.run_cli("peg_parse", "--json", grammar, data="Hi World!")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(len(error["expected"]), 1)
+        self.assertEqual(error["expected"][0]["message"], "expected end of input")
 
     def test_parse_structured_error(self):
         grammar = self.file("g.peg", GREETING)
@@ -178,6 +182,80 @@ class CliTests(unittest.TestCase):
         self.assertEqual(report["error"]["column"], 5)
         self.assertIn("expected", report["error"]["message"].lower())
         self.assertEqual(report["error"]["rule"], "r")
+
+    def test_choice_error_lists_all_tied_expectations(self):
+        grammar = self.file("g.peg", 'root r\nr <- yes / no\nyes <- "yes"\nno <- "no"')
+        result = self.run_cli("peg_parse", "--json", grammar, data="maybe")
+        self.assertEqual(result.returncode, 1)
+        error = json.loads(result.stdout)["error"]
+        self.assertIn('"yes"', error["message"])
+        self.assertIn('"no"', error["message"])
+        self.assertEqual([item["rule"] for item in error["expected"]], ["yes", "no"])
+        self.assertFalse(error["expected_truncated"])
+        author = self.run_cli("peg_test", grammar, "-", data="maybe")
+        self.assertEqual(author.returncode, 1)
+        self.assertIn("g.peg:3:", author.stdout)
+        self.assertIn("g.peg:4:", author.stdout)
+
+    def test_choice_errors_keep_only_farthest_failure(self):
+        grammar = self.file("g.peg", 'root r\nr <- "ab" / "x"')
+        result = self.run_cli("peg_parse", "--json", grammar, data="ac")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["column"], 2)
+        self.assertEqual(len(error["expected"]), 1)
+        self.assertIn('"ab"', error["message"])
+        self.assertNotIn('"x"', error["message"])
+
+    def test_successful_choice_does_not_pollute_later_failure(self):
+        grammar = self.file("g.peg", 'root r\nr <- ("abcd" / "a") "z"')
+        result = self.run_cli("peg_parse", "--json", grammar, data="abcX")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["column"], 2)
+        self.assertIn('"z"', error["message"])
+        self.assertNotIn('"abcd"', error["message"])
+
+    def test_probe_failures_do_not_add_expectations(self):
+        grammar = self.file("g.peg", 'root r\nr <- !"x" "a"? "b"* ("yes" / "no")')
+        result = self.run_cli("peg_parse", "--json", grammar, data="maybe")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(len(error["expected"]), 2)
+        self.assertIn('"yes"', error["message"])
+        self.assertIn('"no"', error["message"])
+        for ignored in ('"x"', '"a"', '"b"'):
+            self.assertNotIn(ignored, error["message"])
+
+    def test_expected_alternatives_are_bounded_and_deduplicated(self):
+        choices = " / ".join(json.dumps(str(i)) for i in range(20))
+        grammar = self.file("g.peg", "root r\nr <- " + choices)
+        result = self.run_cli("peg_parse", "--json", grammar, data="")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(len(error["expected"]), 16)
+        self.assertTrue(error["expected_truncated"])
+        grammar = self.file("g.peg", 'root r\nr <- "x" / "x" / "y"')
+        result = self.run_cli("peg_parse", "--json", grammar, data="")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(len(error["expected"]), 2)
+
+    def test_numeric_literals_require_json_number_syntax(self):
+        for number in ("01", "1.", "-.5", "1.e2", "1e+", "-", "00"):
+            with self.subTest(number=number):
+                rules = self.file("r.pegtx", '"x" => ' + number)
+                result = self.run_cli("peg_transform", rules, data='"x"')
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                grammar = self.file("g.peg", 'root r\nr <- "x"\n@test "bad number" { input: "x" expect: ' + number + ' }')
+                result = self.run_cli("peg_test", grammar)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                # Production parsing still ignores the malformed assertion.
+                result = self.run_cli("peg_parse", grammar, data="x")
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_canonical_numeric_literals_still_work(self):
+        for number in ("0", "-0", "42", "-42", "1.5", "-0.5", "1e2", "1E-2", "1e+2"):
+            with self.subTest(number=number):
+                rules = self.file("r.pegtx", '"x" => ' + number)
+                result = self.run_cli("peg_transform", rules, data='"x"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), json.loads(number))
 
     def test_left_recursion_does_not_hang(self):
         grammar = self.file("g.peg", 'root r\nr <- r / "a"')

@@ -1,5 +1,6 @@
 const std = @import("std");
 const common = @import("common.zig");
+const numbers = @import("numbers.zig");
 
 const max_depth = 256;
 
@@ -130,6 +131,7 @@ const Parser = struct {
                 while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
             }
             const text = self.source[start..self.pos];
+            if (!numbers.isLiteral(text)) return self.fail(start, "invalid number: expected JSON number syntax");
             const value: std.json.Value = if (is_float)
                 .{ .float = std.fmt.parseFloat(f64, text) catch return self.fail(start, "invalid number") }
             else

@@ -131,7 +131,7 @@ peg_test greeting.peg
 # 2 passed, 0 failed
 ```
 
-Test values use JSON-style data with bare object keys and optional commas. Use `\n` for newlines inside an input string. Each test requires `input` and exactly one of `expect` or `reject: true`.
+Test values use JSON-style data with bare object keys and optional commas. Numeric literals must follow JSON number syntax, so `01`, `1.` and `1.e2` are errors. Use `\n` for newlines inside an input string. Each test requires `input` and exactly one of `expect` or `reject: true`.
 
 `expect` compares the whole capture tree, ignoring object key order. A `reject` test passes only for a document mismatch, not for a parser resource limit or broken grammar.
 
@@ -172,11 +172,13 @@ Output expressions can use bound names, literals, arrays, objects and these func
 | `float(value)` | Finite double-precision number |
 | `bool(value)` | Boolean, or conversion of `"true"`/`"false"` |
 
-Transform strings use JSON escapes, including Unicode escapes. Object fields and function arguments require commas. `#` starts a comment. Unknown bindings/functions are errors even when their rule would not match. Rules cannot run host-language code.
+Transform strings use JSON escapes, including Unicode escapes. Numeric literals follow JSON number syntax, including signed exponents such as `1e+2`. Object fields and function arguments require commas. `#` starts a comment. Unknown bindings/functions are errors even when their rule would not match. Rules cannot run host-language code.
 
 ## Diagnostics and limits
 
-`peg_parse` reports the document failure location. `peg_test` also highlights the grammar expression and shows a bounded trace of rule attempts. A successful attempt can later be discarded by backtracking; the trace is not a list of committed matches.
+`peg_parse` reports the document failure location and expected alternatives. For example, `"yes" / "no"` reports `expected literal "yes" or literal "no"`. Tied failures retain up to 16 distinct expectations; repeated expectations appear once, and truncation is reported. Failures from successful choices and optional/lookahead probes do not leak into later errors.
+
+`peg_test` also highlights the grammar expressions for those alternatives and shows a bounded trace of rule attempts. A successful attempt can later be discarded by backtracking; the trace is not a list of committed matches.
 
 Locations use zero-based byte offsets in JSON and one-based line/byte columns in human output. Highlights escape control and non-ASCII bytes so terminal controls cannot run and carets remain aligned with byte positions.
 
@@ -197,4 +199,4 @@ The Python standard-library tests exercise the real executables, including stdin
 
 ## Library
 
-`src/root.zig` exports `engine`, `transform`, `Diagnostic` and `TraceEvent`. APIs accept an allocator; use an arena for each operation and keep source/input buffers alive while using the results. See [SPEC.md](SPEC.md) for interfaces and syntax details.
+`src/root.zig` exports `engine`, `transform`, `Diagnostic`, `Expectation` and `TraceEvent`. APIs accept an allocator; use an arena for each operation and keep source/input buffers alive while using the results. See [SPEC.md](SPEC.md) for interfaces and syntax details.

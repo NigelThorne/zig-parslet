@@ -1,5 +1,6 @@
 const std = @import("std");
 const common = @import("common.zig");
+const numbers = @import("numbers.zig");
 
 pub const TestCase = struct {
     name: []const u8,
@@ -374,7 +375,8 @@ const GrammarParser = struct {
                 while (!self.eof() and std.ascii.isDigit(self.peek())) self.pos += 1;
             }
             const text = self.source[start..self.pos];
-            if (std.fmt.parseFloat(f64, text)) |_| return std.json.Value.parseFromNumberSlice(text) else |_| return self.fail(start, "invalid number");
+            if (!numbers.isLiteral(text)) return self.fail(start, "invalid number: expected JSON number syntax");
+            return std.json.Value.parseFromNumberSlice(text);
         }
         const word = self.identifier() orelse return self.fail(self.pos, "expected test value");
         if (std.mem.eql(u8, word, "true")) return .{ .bool = true };
@@ -503,10 +505,7 @@ const Runtime = struct {
     allocator: std.mem.Allocator,
     grammar: *const Grammar,
     input: []const u8,
-    farthest: usize = 0,
-    farthest_grammar: ?usize = null,
-    farthest_rule: ?[]const u8 = null,
-    expected: ?[]const u8 = null,
+    failed: Failure = .{},
     work: usize = 0,
     trace_enabled: bool,
     traces: std.ArrayList(common.TraceEvent) = .empty,
@@ -516,25 +515,64 @@ const Runtime = struct {
     fn emptyString() std.json.Value {
         return .{ .string = "" };
     }
-    const Failure = struct { farthest: usize, grammar_offset: ?usize, rule: ?[]const u8, expected: ?[]const u8 };
+    // Immutable slices make snapshots safe across speculative branches and probes.
+    const Failure = struct {
+        offset: usize = 0,
+        expected: []const common.Expectation = &.{},
+        truncated: bool = false,
+    };
 
     fn failure(self: *Runtime) Failure {
-        return .{ .farthest = self.farthest, .grammar_offset = self.farthest_grammar, .rule = self.farthest_rule, .expected = self.expected };
+        return self.failed;
     }
     fn restoreFailure(self: *Runtime, saved: Failure) void {
-        self.farthest = saved.farthest;
-        self.farthest_grammar = saved.grammar_offset;
-        self.farthest_rule = saved.rule;
-        self.expected = saved.expected;
+        self.failed = saved;
     }
-    fn failAt(self: *Runtime, pos: usize, grammar_offset: usize, expected: []const u8) ?Match {
-        if (pos >= self.farthest) {
-            self.farthest = pos;
-            self.farthest_grammar = grammar_offset;
-            self.expected = expected;
-            self.farthest_rule = if (self.active.items.len == 0) null else self.grammar.rules[self.active.items[self.active.items.len - 1].rule].name;
+    fn failAt(self: *Runtime, pos: usize, grammar_offset: usize, expected: []const u8) !?Match {
+        if (pos < self.failed.offset) return null;
+        if (pos > self.failed.offset) self.failed = .{ .offset = pos };
+        for (self.failed.expected) |item| {
+            if (std.mem.eql(u8, item.message, expected)) return null;
         }
+        if (self.failed.expected.len == 16) {
+            self.failed.truncated = true;
+            return null;
+        }
+        const items = try self.allocator.alloc(common.Expectation, self.failed.expected.len + 1);
+        @memcpy(items[0..self.failed.expected.len], self.failed.expected);
+        items[self.failed.expected.len] = .{
+            .message = expected,
+            .grammar_offset = grammar_offset,
+            .rule = if (self.active.items.len == 0) null else self.grammar.rules[self.active.items[self.active.items.len - 1].rule].name,
+        };
+        self.failed.expected = items;
         return null;
+    }
+
+    fn diagnostic(self: *Runtime) !common.Diagnostic {
+        const first: ?common.Expectation = if (self.failed.expected.len > 0) self.failed.expected[0] else null;
+        var message: std.Io.Writer.Allocating = .init(self.allocator);
+        if (self.limit_message) |limit| {
+            try message.writer.writeAll(limit);
+        } else if (self.failed.expected.len == 0) {
+            try message.writer.writeAll("input did not match grammar");
+        } else {
+            for (self.failed.expected, 0..) |item, index| {
+                if (index != 0) try message.writer.writeAll(" or ");
+                const text = if (index != 0 and std.mem.startsWith(u8, item.message, "expected ")) item.message[9..] else item.message;
+                try message.writer.writeAll(text);
+            }
+            if (self.failed.truncated) try message.writer.writeAll(" or other alternatives (list capped at 16)");
+        }
+        return .{
+            .kind = if (self.limit_message != null) .limit else .input,
+            .offset = self.failed.offset,
+            .message = try message.toOwnedSlice(),
+            .grammar_offset = if (first) |item| item.grammar_offset else null,
+            .rule = if (first) |item| item.rule else null,
+            .expected = if (self.limit_message != null) &.{} else self.failed.expected,
+            .expected_truncated = self.limit_message == null and self.failed.truncated,
+        };
     }
     fn ruleIndex(self: *Runtime, name: []const u8) usize {
         for (self.grammar.rules, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
@@ -616,7 +654,11 @@ const Runtime = struct {
             .class => |x| if (pos < self.input.len and (classContains(x.ranges, self.input[pos]) != x.inverted)) .{ .pos = pos + 1, .value = .{ .string = self.input[pos .. pos + 1] }, .structured = false } else self.failAt(pos, x.offset, x.expected),
             .reference => |x| self.matchRule(self.ruleIndex(x.name), pos, depth),
             .choice => |xs| blk: {
-                for (xs) |x| if (try self.matchExpr(x, pos, depth + 1)) |m| break :blk m;
+                const saved = self.failure();
+                for (xs) |x| if (try self.matchExpr(x, pos, depth + 1)) |m| {
+                    self.restoreFailure(saved);
+                    break :blk m;
+                };
                 break :blk null;
             },
             .sequence => |xs| blk: {
@@ -693,10 +735,18 @@ pub fn parse(allocator: std.mem.Allocator, grammar: *const Grammar, input: []con
     var runtime = Runtime{ .allocator = allocator, .grammar = grammar, .input = input, .trace_enabled = trace };
     const matched = try runtime.matchRule(grammar.root, 0, 0);
     const events = try runtime.traces.toOwnedSlice(allocator);
-    if (runtime.limit_message) |message| return .{ .diagnostic = .{ .kind = .limit, .offset = runtime.farthest, .message = message, .grammar_offset = runtime.farthest_grammar, .rule = runtime.farthest_rule }, .trace = events };
+    if (runtime.limit_message != null) return .{ .diagnostic = try runtime.diagnostic(), .trace = events };
     if (matched) |m| {
         if (m.pos == input.len) return .{ .value = m.value, .trace = events };
-        return .{ .diagnostic = .{ .kind = .input, .offset = m.pos, .message = "expected end of input", .grammar_offset = grammar.rules[grammar.root].offset, .rule = grammar.rules[grammar.root].name }, .trace = events };
+        runtime.failed = .{
+            .offset = m.pos,
+            .expected = try allocator.dupe(common.Expectation, &.{.{
+                .message = "expected end of input",
+                .grammar_offset = grammar.rules[grammar.root].offset,
+                .rule = grammar.rules[grammar.root].name,
+            }}),
+        };
+        return .{ .diagnostic = try runtime.diagnostic(), .trace = events };
     }
-    return .{ .diagnostic = .{ .kind = .input, .offset = runtime.farthest, .message = runtime.expected orelse "input did not match grammar", .grammar_offset = runtime.farthest_grammar, .rule = runtime.farthest_rule }, .trace = events };
+    return .{ .diagnostic = try runtime.diagnostic(), .trace = events };
 }

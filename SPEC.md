@@ -28,7 +28,7 @@ Expressions: string literals, character classes/ranges/inversion, `.`, rule refe
 
 Without captures, matching returns matched text. In sequences, captures discard uncaptured text; adjacent capture objects merge, with later duplicate keys winning. Repetitions with captured items produce arrays, including singleton arrays. A sequence combining capture objects and arrays flattens them into an array of structured items. Empty uncaptured matches produce an empty string. These are Parslet-inspired rules, not a promise of bug-for-bug Elixir/Ruby compatibility.
 
-Test blocks use relaxed JSON values, with bare object keys and optional commas. Each test requires a string input and exactly one `expect` tree or `reject: true`. peg_parse skips balanced test blocks without validating their contents. peg_test validates them and reports expected/actual mismatch or unexpected success. Unknown rules, duplicates and invalid roots are errors. Left recursion, zero-width repeat and excessive recursion/work must fail rather than hang.
+Test blocks use relaxed JSON values, with bare object keys and optional commas. Numeric literals follow JSON number syntax, including fraction/exponent digits and no leading zeros. Each test requires a string input and exactly one `expect` tree or `reject: true`. peg_parse skips balanced test blocks without validating their contents. peg_test validates them and reports expected/actual mismatch or unexpected success. Unknown rules, duplicates and invalid roots are errors. Left recursion, zero-width repeat and excessive recursion/work must fail rather than hang.
 
 ## Transform
 
@@ -42,7 +42,7 @@ Test blocks use relaxed JSON values, with bare object keys and optional commas. 
 
 Object patterns match exact keys. Patterns also support arrays, scalar literals, `simple(name)` for scalar values, `sequence(name)` for arrays of scalars, and `subtree(name)` for any value. Repeated bindings must be deeply equal. Children transform before parents, then the first matching rule applies once; replacement values are not traversed again. Unmatched nodes are unchanged.
 
-Output expressions support bindings, literals, arrays, objects and `concat`, `join`, `int`, `float`, `bool`. No arbitrary code. Unknown variables/functions and malformed rules are diagnosed. Invalid conversions fail, not silently coerce to zero.
+Output expressions support bindings, literals, arrays, objects and `concat`, `join`, `int`, `float`, `bool`. Numeric literals follow JSON number syntax; conversion functions retain their separate string-conversion semantics. No arbitrary code. Unknown variables/functions and malformed rules are diagnosed. Invalid conversions fail, not silently coerce to zero.
 
 ## Internal interfaces
 
@@ -75,7 +75,7 @@ pub fn parse(allocator: std.mem.Allocator, grammar: *const Grammar,
     input: []const u8, trace: bool) anyerror!ParseResult;
 ```
 
-Compilation failure sets diagnostic and returns an error. Parse mismatch returns a diagnostic in ParseResult, not an exception. Diagnostic offset refers to grammar text on compile error, input text on parse failure; optional grammar_offset refers to failing expression. Rule trace is bounded, and attempts may have been backtracked even when they matched.
+Compilation failure sets diagnostic and returns an error. Parse mismatch returns a diagnostic in ParseResult, not an exception. Diagnostic offset refers to grammar text on compile error, input text on parse failure; optional grammar_offset refers to failing expression. Diagnostic.expected contains up to 16 distinct expectations at the farthest failing input byte, each with a message, grammar_offset and optional rule. Identical messages are deduplicated, retaining their first grammar location. expected_truncated indicates further distinct alternatives were omitted. Successful choices and successful optional/repetition/lookahead probes discard their speculative failures. Rule trace is bounded, and attempts may have been backtracked even when they matched.
 
 Transform (`src/transform.zig`):
 
