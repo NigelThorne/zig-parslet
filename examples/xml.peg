@@ -1,0 +1,58 @@
+# A bounded XML subset, inspired by ElixirParslet's simple XML example.
+# One root, ASCII names, no attributes/namespaces/DTD/declarations/comments/CDATA.
+# The transform validates equal opening/closing names; PEG recognizes structure.
+root document
+document <- ws element ws
+ws <- [ \t\r\n]*
+name <- [A-Za-z_] [A-Za-z0-9_.-]*
+
+element <- xml_element:("<" xml_open:name ws
+           ("/>" / ">" (xml_children:node+ / xml_empty:&"</") "</" xml_close:name ws ">"))
+node <- xml_child:(element / text)
+text <- xml_text:fragment+
+fragment <- xml_chars:characters / xml_entity:entity / xml_newline:("\r\n" / "\r")
+entity <- "&lt;" / "&gt;" / "&amp;" / "&quot;" / "&apos;"
+characters <- (!"]]>" character)+
+# XML 1.0 literal characters, excluding markup and CR handled above.
+character <- [\x09\x0a\x20-\x25\x27-\x3b\x3d-\x7f] / utf8
+
+# Valid UTF-8 scalar values except U+FFFE/U+FFFF, disallowed by XML 1.0.
+utf8 <- [\xc2-\xdf] continuation
+      / [\xe0] [\xa0-\xbf] continuation
+      / [\xe1-\xec\xee] continuation continuation
+      / [\xed] [\x80-\x9f] continuation
+      / [\xef] !([\xbf] [\xbe-\xbf]) continuation continuation
+      / [\xf0] [\x90-\xbf] continuation continuation
+      / [\xf1-\xf3] continuation continuation continuation
+      / [\xf4] [\x80-\x8f] continuation continuation
+continuation <- [\x80-\xbf]
+
+@test "self closing" {
+  input: "<test/>"
+  expect: { xml_element: { xml_open: "test" } }
+}
+@test "empty pair" {
+  input: "<test></test>"
+  expect: { xml_element: { xml_open: "test", xml_empty: "", xml_close: "test" } }
+}
+@test "text" {
+  input: "<test>example</test>"
+  expect: { xml_element: { xml_open: "test", xml_children: [{ xml_child: { xml_text: [{ xml_chars: "example" }] } }], xml_close: "test" } }
+}
+@test "nested singleton" {
+  input: "<a><b/></a>"
+  expect: { xml_element: { xml_open: "a", xml_children: [{ xml_child: { xml_element: { xml_open: "b" } } }], xml_close: "a" } }
+}
+@test "tag equality is checked by the transform" {
+  input: "<a></b>"
+  expect: { xml_element: { xml_open: "a", xml_empty: "", xml_close: "b" } }
+}
+@test "one root required" { input: "" reject: true }
+@test "missing close" { input: "<a>text" reject: true }
+@test "multiple roots" { input: "<a/><b/>" reject: true }
+@test "no attributes" { input: "<a x='1'/>" reject: true }
+@test "no namespaces" { input: "<a:b/>" reject: true }
+@test "unknown entity" { input: "<a>&unknown;</a>" reject: true }
+@test "numeric entity outside subset" { input: "<a>&#65;</a>" reject: true }
+@test "forbidden text delimiter" { input: "<a>]]></a>" reject: true }
+@test "forbidden control" { input: "<a>\u0000</a>" reject: true }

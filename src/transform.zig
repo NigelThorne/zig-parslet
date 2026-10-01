@@ -210,10 +210,12 @@ fn validateOutput(parser: *Parser, node: *Node, names: *const std.StringHashMap(
             const is_conversion = std.mem.eql(u8, call.name, "int") or std.mem.eql(u8, call.name, "float") or std.mem.eql(u8, call.name, "bool");
             const is_unary = is_conversion or std.mem.eql(u8, call.name, "unquote") or std.mem.eql(u8, call.name, "number") or std.mem.eql(u8, call.name, "from_entries");
             const is_pluck = std.mem.eql(u8, call.name, "pluck");
-            if (!(std.mem.eql(u8, call.name, "concat") or is_join or is_unary or is_pluck)) return parser.fail(node.offset, "unknown output function");
+            const is_equal = std.mem.eql(u8, call.name, "require_equal");
+            if (!(std.mem.eql(u8, call.name, "concat") or is_join or is_unary or is_pluck or is_equal)) return parser.fail(node.offset, "unknown output function");
             if (is_join and (call.args.len < 1 or call.args.len > 2)) return parser.fail(node.offset, "join expects one or two arguments");
             if (is_unary and call.args.len != 1) return parser.fail(node.offset, "output function expects one argument");
             if (is_pluck and call.args.len != 2) return parser.fail(node.offset, "pluck expects two arguments");
+            if (is_equal and call.args.len != 2) return parser.fail(node.offset, "require_equal expects two arguments");
             for (call.args) |arg| try validateOutput(parser, arg, names, depth + 1);
         },
     }
@@ -331,6 +333,12 @@ fn evaluateCall(allocator: std.mem.Allocator, offset: usize, call: Call, binding
             try out.appendSlice(allocator, text);
         }
         return .{ .string = try out.toOwnedSlice(allocator) };
+    }
+    if (std.mem.eql(u8, call.name, "require_equal")) {
+        const left = try evaluate(allocator, call.args[0], bindings, diagnostic, depth);
+        const right = try evaluate(allocator, call.args[1], bindings, diagnostic, depth);
+        if (!deepEqual(left, right)) return runtimeFail(diagnostic, offset, "require_equal values differ", error.InvalidTransform);
+        return left;
     }
     if (std.mem.eql(u8, call.name, "pluck")) {
         const value = try evaluate(allocator, call.args[0], bindings, diagnostic, depth);

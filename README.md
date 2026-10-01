@@ -78,6 +78,29 @@ No header inference, type conversion, trimming or BOM stripping occurs. Rows may
 
 The transform uses only existing pattern rules and `join`. No CSV-specific runtime helper is involved.
 
+## XML to element trees
+
+```sh
+./zig-out/bin/peg_test examples/xml.peg
+set -o pipefail
+./zig-out/bin/peg_parse examples/xml.peg examples/xml.xml |
+  ./zig-out/bin/peg_transform examples/xml.pegtx
+```
+
+This is an explicit XML subset, not a general XML parser. It supports one root element, nested and self-closing elements, mixed text, and the five predefined entities. Names use ASCII letters/underscore followed by letters, digits, underscore, dot or hyphen. Exterior XML whitespace is ignored. Text whitespace and child order are preserved; CRLF and CR normalize to LF. Literal characters must satisfy XML 1.0 and valid UTF-8.
+
+```text
+<a>Hello<b/> &amp; goodbye</a>
+                 ↓
+{"tag":"a","children":["Hello",{"tag":"b","children":[]}," & goodbye"]}
+```
+
+Empty elements always have `children: []`. Adjacent text fragments and decoded entities join into one string. Entity decoding happens once, so `&amp;lt;` becomes literal `&lt;`, not `<`.
+
+Attributes, namespaces, XML declarations, processing instructions, comments, CDATA, DTDs and numeric character references are outside this subset and rejected. No external entities are loaded.
+
+**Both stages are required for validation.** The grammar recognizes tag structure; the transform uses `require_equal` to reject unequal opening/closing names. Thus `peg_parse` alone accepts `<a></b>`, while `peg_transform` exits 1 without a partial result. Embedded grammar tests assert capture trees, not this semantic check. Mismatch diagnostics point to the transform rule, not the XML source tag.
+
 ## Commands
 
 | Command | Input | Output |
@@ -210,8 +233,11 @@ Output expressions can use bound names, literals, arrays, objects and these func
 | `number(text)` | Validate a JSON numeric token and emit it unchanged as a number |
 | `pluck(array, key)` | Extract a named field from each object, preserving order |
 | `from_entries(array)` | Build an object from exact `{key: string, value: any}` entries |
+| `require_equal(a, b)` | Return `a` if deeply equal to `b`; otherwise fail |
 
 `pluck` rejects missing keys or non-object elements. `from_entries` rejects malformed entries, returns `{}` for an empty array and keeps the last value for duplicate keys. Neither operation changes its input. `unquote` rejects arrays, objects and other non-string JSON values; it does not parse whole JSON documents. `number` preserves precision rather than converting through a floating-point value. Explicit `int(number(...))` and `float(number(...))` conversions still enforce their normal limits.
+
+`require_equal` uses the same representation-sensitive deep equality as repeated bindings, ignoring object key order. Unlike a repeated binding, unequal values cause a runtime error rather than a non-matching rule. It requires exactly two arguments.
 
 Transform strings use JSON escapes, including Unicode escapes. Numeric literals follow JSON number syntax, including signed exponents such as `1e+2`. Object fields and function arguments require commas. `#` starts a comment. Unknown bindings/functions are errors even when their rule would not match. Rules cannot run host-language code.
 
@@ -236,7 +262,7 @@ mise exec -- zig build
 python3 tests/cli_test.py
 ```
 
-The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. JSON round trips include a reproducible 60-document generated corpus checked against Python's JSON decoder, plus malformed document, Unicode and exact numeric-token cases. CSV has a separate reproducible 60-document corpus checked against Python's CSV reader, with empty fields, mixed row widths, quotes and multiline data. No Python package installation is needed.
+The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. JSON round trips include a reproducible 60-document generated corpus checked against Python's JSON decoder, plus malformed document, Unicode and exact numeric-token cases. CSV has a separate reproducible 60-document corpus checked against Python's CSV reader, with empty fields, mixed row widths, quotes and multiline data. XML adds a reproducible 60-document corpus compared with Python's ElementTree, plus mismatched tags, malformed UTF-8, entities and mixed-content cases. No Python package installation is needed.
 
 ## Library
 

@@ -8,6 +8,8 @@ import random
 import subprocess
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = ROOT / "zig-out" / "bin"
@@ -518,6 +520,111 @@ class CliTests(unittest.TestCase):
         actual = self.csv_rows(document)
         self.assertEqual(actual, expected)
         self.assertIn('00123', actual[1])
+
+    def xml_tree(self, document):
+        parsed = self.run_cli("peg_parse", ROOT / "examples/xml.peg", data=document)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        transformed = self.run_cli("peg_transform", ROOT / "examples/xml.pegtx", data=parsed.stdout)
+        self.assertEqual(transformed.returncode, 0, transformed.stderr)
+        return json.loads(transformed.stdout)
+
+    @staticmethod
+    def python_xml_tree(document):
+        def convert(element):
+            children = [element.text] if element.text else []
+            for child in element:
+                children.append(convert(child))
+                if child.tail:
+                    children.append(child.tail)
+            return {"tag": element.tag, "children": children}
+        return convert(ET.fromstring(document))
+
+    def test_xml_empty_nested_and_mixed_content(self):
+        documents = [
+            "<test>example</test>", "<a/>", "<a></a>", " \n<a />\t",
+            "<a><b/></a>", "<a><b/><c>value</c></a>",
+            "<a>before<b/>between<c>inside</c>after</a>",
+            "<xml_open><xml_children/><tag><children/></tag></xml_open>",
+            "<a>  keep\tspaces\n </a>", "<_a-1.b>ok</_a-1.b >",
+        ]
+        for document in documents:
+            with self.subTest(document=document):
+                self.assertEqual(self.xml_tree(document), self.python_xml_tree(document))
+
+    def test_xml_entities_unicode_and_line_endings(self):
+        for text in ["&lt;&gt;&amp;&quot;&apos;", "&amp;lt;", "café 😀 漢字",
+                     "a\r\nb\rc\nd", "\t\n\r", "\u007f\u0080\ud7ff\ue000\ufffd\U0010ffff",
+                     "]] &gt; ]&gt;", "'quoted' \"text\""]:
+            document = "<a>" + text + "</a>"
+            with self.subTest(text=text):
+                self.assertEqual(self.xml_tree(document), self.python_xml_tree(document))
+
+    def test_xml_generated_corpus_matches_python(self):
+        rng = random.Random(8173)
+        names = ["a", "child", "_item", "a-b", "xml_element", "tag", "children"]
+        texts = ["", "hello", "  ", "<&>", "café😀", "\r\n", "\t", "]]>"]
+
+        def element(depth=0):
+            name = rng.choice(names)
+            if rng.randrange(4) == 0:
+                return "<" + name + "/>"
+            parts = [escape(rng.choice(texts))]
+            if depth < 3:
+                for _ in range(rng.randrange(3)):
+                    parts.extend([element(depth + 1), escape(rng.choice(texts))])
+            return "<" + name + ">" + "".join(parts) + "</" + name + ">"
+
+        for _ in range(60):
+            document = element()
+            with self.subTest(document=document):
+                self.assertEqual(self.xml_tree(document), self.python_xml_tree(document))
+
+    def test_xml_mismatched_tags_fail_transform_without_partial_output(self):
+        for document in ["<a></b>", "<a><b></c></a>", "<a><b/></A>", "<a><b></a></b>"]:
+            with self.subTest(document=document):
+                parsed = self.run_cli("peg_parse", ROOT / "examples/xml.peg", data=document)
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+                result = self.run_cli("peg_transform", ROOT / "examples/xml.pegtx", data=parsed.stdout)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("require_equal values differ", result.stderr)
+
+    def test_xml_rejects_malformed_and_out_of_subset_documents(self):
+        documents = ["", "text", "<a>", "<a", "<a></a", "<a/><b/>",
+                     "<1a/>", "<a:b/>", "<a x='1'/>", "<a/ >", "< a/>",
+                     "<a></ a>", "<?xml version='1.0'?><a/>", "<!--x--><a/>",
+                     "<!DOCTYPE a><a/>", "<a><![CDATA[x]]></a>", "<a>&unknown;</a>",
+                     "<a>&#65;</a>", "<a>&#x41;</a>", "<a>&amp</a>",
+                     "<a>&</a>", "<a>]]></a>", "<a>\x00</a>", "<a>\x01</a>",
+                     "<a>\x0b</a>", "<a>\ufffe</a>", "<a>\uffff</a>"]
+        for document in documents:
+            with self.subTest(document=document):
+                result = self.run_cli("peg_parse", ROOT / "examples/xml.peg", data=document)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_xml_rejects_invalid_utf8(self):
+        for text in [b"\x80", b"\xc0\xaf", b"\xed\xa0\x80", b"\xf4\x90\x80\x80", b"\xe2\x82"]:
+            result = subprocess.run([str(BIN / "peg_parse"), str(ROOT / "examples/xml.peg")],
+                                    input=b"<a>" + text + b"</a>", capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, b"")
+
+    def test_xml_example_document(self):
+        document = (ROOT / "examples/xml.xml").read_text()
+        self.assertEqual(self.xml_tree(document), self.python_xml_tree(document))
+
+    def test_require_equal_structured_error_and_arity(self):
+        rules = self.file("eq.pegtx", "{ a: simple(a), b: simple(b) } => require_equal(a, b)")
+        result = self.run_cli("peg_transform", rules, "--json", data='{"a":"a","b":"b"}')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("require_equal values differ", result.stdout)
+        json.loads(result.stdout)
+        for args in ["", "1", "1, 1, 1"]:
+            rules = self.file("arity.pegtx", "{ x: 1 } => require_equal(" + args + ")")
+            result = self.run_cli("peg_transform", rules, data="null")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("two arguments", result.stderr)
 
     def test_shipped_embedded_tests(self):
         grammars = sorted((ROOT / "examples").glob("*.peg"))

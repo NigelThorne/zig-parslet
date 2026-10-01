@@ -144,6 +144,9 @@ test "new output helper names and arity are validated before matching" {
         "{ x: 1 } => pluck([])",
         "{ x: 1 } => pluck([], \"key\", \"extra\")",
         "{ x: 1 } => from_entries([], [])",
+        "{ x: 1 } => require_equal()",
+        "{ x: 1 } => require_equal(1)",
+        "{ x: 1 } => require_equal(1, 1, 1)",
     };
     for (cases) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -181,6 +184,34 @@ test "new output helpers reject invalid syntax and argument types without partia
         try std.testing.expectError(error.InvalidTransform, transform.apply(allocator, case.source, input, &diagnostic));
         try std.testing.expectEqual(common.Diagnostic.Kind.transform, diagnostic.?.kind);
         try std.testing.expect(diagnostic.?.offset < case.source.len);
+    }
+}
+
+test "require_equal returns equal values and preserves nested structure" {
+    try run("{ a: subtree(a), b: subtree(b) } => require_equal(a, b)", "{\"a\":{\"items\":[1,null,true]},\"b\":{\"items\":[1,null,true]}}", "{\"items\":[1,null,true]}");
+    try run("{ a: simple(a), b: simple(b) } => require_equal(a, b)", "{\"a\":\"tag\",\"b\":\"tag\"}", "\"tag\"");
+    try run("{ a: subtree(a), b: subtree(b) } => require_equal(a, b)", "{\"a\":{\"x\":1,\"y\":2},\"b\":{\"y\":2,\"x\":1}}", "{\"x\":1,\"y\":2}");
+}
+
+test "require_equal rejects mismatches with function source offset" {
+    const source = "{ a: subtree(a), b: subtree(b) } => require_equal(a, b)";
+    const inputs = [_][]const u8{
+        "{\"a\":\"a\",\"b\":\"b\"}",
+        "{\"a\":[1],\"b\":[1,2]}",
+        "{\"a\":{\"nested\":1},\"b\":{\"nested\":2}}",
+        "{\"a\":1,\"b\":1.0}",
+        "{\"a\":null,\"b\":false}",
+    };
+    for (inputs) |input_text| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var diagnostic: ?common.Diagnostic = null;
+        const input = try parseJson(allocator, input_text);
+        try std.testing.expectError(error.InvalidTransform, transform.apply(allocator, source, input, &diagnostic));
+        try std.testing.expectEqual(common.Diagnostic.Kind.transform, diagnostic.?.kind);
+        try std.testing.expectEqual(std.mem.indexOf(u8, source, "require_equal").?, diagnostic.?.offset);
+        try std.testing.expectEqualStrings("require_equal values differ", diagnostic.?.message);
     }
 }
 

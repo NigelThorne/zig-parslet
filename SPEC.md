@@ -42,7 +42,7 @@ Test blocks use relaxed JSON values, with bare object keys and optional commas. 
 
 Object patterns match exact keys. Patterns also support arrays, scalar literals, `simple(name)` for scalar values, `sequence(name)` for arrays of scalars, and `subtree(name)` for any value. Repeated bindings must be deeply equal. Children transform before parents, then the first matching rule applies once; replacement values are not traversed again. Unmatched nodes are unchanged.
 
-Output expressions support bindings, literals, arrays, objects and `concat`, `join`, `int`, `float`, `bool`, `unquote`, `number`, `pluck`, `from_entries`. Numeric literals follow JSON number syntax; conversion functions retain their separate string-conversion semantics. No arbitrary code. Unknown variables/functions and malformed rules are diagnosed. Invalid conversions fail, not silently coerce to zero.
+Output expressions support bindings, literals, arrays, objects and `concat`, `join`, `int`, `float`, `bool`, `unquote`, `number`, `pluck`, `from_entries`, `require_equal`. Numeric literals follow JSON number syntax; conversion functions retain their separate string-conversion semantics. No arbitrary code. Unknown variables/functions and malformed rules are diagnosed. Invalid conversions fail, not silently coerce to zero.
 
 New JSON-oriented helpers:
 
@@ -51,7 +51,19 @@ New JSON-oriented helpers:
 - `pluck(array, key)` requires an array of objects and a string key. Missing keys and non-object elements are errors; arbitrary selected values are preserved.
 - `from_entries(array)` requires exact `{key: STRING, value: ANY}` entries. It creates an object, with the last value winning for duplicate keys. Empty input creates an empty object.
 
+`require_equal(a, b)` takes exactly two values, returns the first unchanged when deeply equal, and fails with `error.InvalidTransform` otherwise. Equality matches repeated-binding semantics, including representation-sensitive numbers and order-insensitive object keys. Mismatch diagnostics identify the function expression in the transform source. Unmatched pattern behavior remains unchanged.
+
 All helper names and arities are validated when loading rules. Replacement values are not re-transformed. The JSON example retains entry/element wrappers until container reduction to avoid confusing singleton nested containers or user keys with parser tags.
+
+## XML example contract
+
+`examples/xml.peg` and `examples/xml.pegtx` implement a bounded XML subset inspired by the ElixirParslet example. The output is `{tag: string, children: [string | element]}`. Child order and text whitespace are preserved. Text fragments join, entities decode once, and literal CRLF/CR normalize to LF. Empty paired and self-closing elements both have empty child arrays.
+
+Require one root with optional exterior XML whitespace. Names are `[A-Za-z_][A-Za-z0-9_.-]*`. Support nested elements, mixed content and `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`. Validate UTF-8 and XML 1.0 literal character ranges; reject literal `]]>` in text.
+
+Reject attributes, namespaces, declarations, processing instructions, comments, CDATA, DTDs and numeric character references. No external entity access. Normal engine depth/work limits apply.
+
+The grammar checks structure only. Tag-name equality is checked in the transform with `require_equal`; mismatches fail with exit 1 and no partial JSON output in normal mode. Parse-only success is not proof of well-formed XML. Transform diagnostics refer to `.pegtx` source rather than document tag positions.
 
 ## Internal interfaces
 

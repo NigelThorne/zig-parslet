@@ -1,0 +1,16 @@
+# Decode fragments once. Entity replacements are never parsed again.
+{ xml_chars: simple(s) } => s
+{ xml_entity: "&lt;" } => "<"
+{ xml_entity: "&gt;" } => ">"
+{ xml_entity: "&amp;" } => "&"
+{ xml_entity: "&quot;" } => "\""
+{ xml_entity: "&apos;" } => "'"
+{ xml_newline: simple(s) } => "\n"
+{ xml_text: sequence(parts) } => join(parts)
+
+# Preserve xml_child wrappers until their parent consumes them.
+# require_equal rejects mismatches rather than leaving an unmatched node intact.
+{ xml_open: simple(o), xml_children: subtree(children), xml_close: simple(c) } => { tag: require_equal(o, c), children: pluck(children, "xml_child") }
+{ xml_open: simple(o), xml_empty: "", xml_close: simple(c) } => { tag: require_equal(o, c), children: [] }
+{ xml_open: simple(name) } => { tag: name, children: [] }
+{ xml_element: subtree(element) } => element
