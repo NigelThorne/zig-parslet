@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Black-box acceptance tests. Build first: mise exec -- zig build."""
+import json
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BIN = ROOT / "zig-out" / "bin"
+GREETING = '''root greeting
+greeting <- "Hi " who:[a-zA-Z]+
+@test "captures name" { input: "Hi World" expect: { who: "World" } }
+@test "missing name" { input: "Hi " reject: true }
+'''
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = pathlib.Path(self.temp.name)
+
+    def file(self, name, text):
+        path = self.directory / name
+        path.write_text(text)
+        return str(path)
+
+    def run_cli(self, command, *args, data=None):
+        binary = BIN / command
+        self.assertTrue(binary.is_file(), f"{command} has not been built")
+        return subprocess.run([str(binary), *map(str, args)], input=data,
+                              text=True, capture_output=True, timeout=10)
+
+    def test_help(self):
+        for command in ("peg_parse", "peg_test", "peg_transform"):
+            with self.subTest(command=command):
+                result = self.run_cli(command, "--help")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(command, result.stdout)
+                self.assertIn("--json", result.stdout)
+
+    def test_unknown_flag_fails_before_opening_files(self):
+        for command in ("peg_parse", "peg_test", "peg_transform"):
+            result = self.run_cli(command, "nonexistent", "--bogus")
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("unknown flag", result.stderr)
+            self.assertIn("--help", result.stderr)
+
+    def test_missing_arguments_are_usage_errors(self):
+        for command in ("peg_parse", "peg_test", "peg_transform"):
+            result = self.run_cli(command)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("usage", result.stderr.lower())
+
+    def test_parse_stdin_capture(self):
+        grammar = self.file("g.peg", GREETING)
+        result = self.run_cli("peg_parse", grammar, data="Hi World")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"who": "World"})
+        self.assertEqual(result.stderr, "")
+
+    def test_parse_named_input(self):
+        grammar = self.file("g.peg", GREETING)
+        source = self.file("input.txt", "Hi Nigel")
+        result = self.run_cli("peg_parse", grammar, source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"who": "Nigel"})
+
+    def test_parse_rejects_trailing_input(self):
+        grammar = self.file("g.peg", GREETING)
+        result = self.run_cli("peg_parse", grammar, data="Hi World!")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("^", result.stderr)
+        self.assertIn("1:9", result.stderr)
+
+    def test_parse_structured_error(self):
+        grammar = self.file("g.peg", GREETING)
+        result = self.run_cli("peg_parse", "--json", grammar, data="Hi ")
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["error"]["line"], 1)
+        self.assertEqual(report["error"]["column"], 4)
+        self.assertIn("[a-zA-Z]", report["error"]["message"])
+
+    def test_parse_skips_invalid_test_contents(self):
+        grammar = self.file("g.peg", 'root r\nr <- "ok"\n@test "unfinished" { nonsense: [42] }\n')
+        result = self.run_cli("peg_parse", grammar, data="ok")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), "ok")
+        result = self.run_cli("peg_test", grammar)
+        self.assertEqual(result.returncode, 2)
+
+    def test_embedded_tests(self):
+        result = self.run_cli("peg_test", self.file("g.peg", GREETING))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("captures name", result.stdout)
+        self.assertIn("missing name", result.stdout)
+        self.assertIn("2 passed", result.stdout)
+
+    def test_embedded_test_structured_report(self):
+        result = self.run_cli("peg_test", "--json", self.file("g.peg", GREETING))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["passed"], 2)
+        self.assertEqual(report["failed"], 0)
+        self.assertEqual(len(report["tests"]), 2)
+
+    def test_tree_mismatch(self):
+        grammar = self.file("g.peg", GREETING.replace('expect: { who: "World" }', 'expect: { who: "Wrong" }'))
+        result = self.run_cli("peg_test", grammar)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("expected", result.stdout.lower())
+        self.assertIn("actual", result.stdout.lower())
+        self.assertIn("Wrong", result.stdout)
+        self.assertIn("World", result.stdout)
+
+    def test_unexpected_success(self):
+        grammar = self.file("g.peg", 'root r\nr <- "ok"\n@test "rejects" { input: "ok" reject: true }')
+        result = self.run_cli("peg_test", grammar)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected", result.stdout.lower())
+
+    def test_no_tests_is_explicit(self):
+        result = self.run_cli("peg_test", self.file("g.peg", 'root r\nr <- "ok"'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no embedded tests", result.stdout.lower())
+
+    def test_author_feedback_has_both_sources(self):
+        grammar = self.file("g.peg", 'root r\nr <- "Hi " name\nname <- [a-z]+')
+        source = self.file("bad.txt", "Hi 123")
+        result = self.run_cli("peg_test", grammar, source)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("bad.txt:1:4", result.stdout)
+        self.assertIn("g.peg:", result.stdout)
+        self.assertIn("name", result.stdout)
+        self.assertIn("^", result.stdout)
+        self.assertIn("attempt", result.stdout.lower())
+
+    def test_author_json_includes_trace_and_grammar_location(self):
+        grammar = self.file("g.peg", 'root r\nr <- "Hi " name\nname <- [a-z]+')
+        result = self.run_cli("peg_test", "--json", grammar, "-", data="Hi 123")
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertIn("trace", report)
+        self.assertTrue(report["trace"])
+        self.assertEqual(report["error"]["grammar_location"]["line"], 3)
+
+    def test_peg_operators(self):
+        cases = [
+            ('("a" / "b")+', "abba", "abba"),
+            ('&"a" .', "a", "a"),
+            ('!"x" .', "a", "a"),
+            ('[^x]+', "abc", "abc"),
+            ('(item:[a-z])+', "ab", [{"item": "a"}, {"item": "b"}]),
+            ('name:[a-z]+', "ab", {"name": "ab"}),
+            ('(name:"a")?', "a", {"name": "a"}),
+            ('""?', "", ""),
+            ('a:"a" " " b:"b"', "a b", {"a": "a", "b": "b"}),
+            ('outer:(inner:"x")', "x", {"outer": {"inner": "x"}}),
+            ('"\\u0061"', "a", "a"),
+            ('[\\t\\n]+', "\t\n", "\t\n"),
+            ('"😀"', "😀", "😀"),
+        ]
+        for expression, text, expected in cases:
+            with self.subTest(expression=expression):
+                grammar = self.file("g.peg", "root r\nr <- " + expression)
+                result = self.run_cli("peg_parse", grammar, data=text)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), expected)
+
+    def test_literal_error_identifies_first_differing_byte(self):
+        grammar = self.file("g.peg", 'root r\nr <- "Hello"')
+        result = self.run_cli("peg_parse", "--json", grammar, data="Hellu")
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["error"]["column"], 5)
+        self.assertIn("expected", report["error"]["message"].lower())
+        self.assertEqual(report["error"]["rule"], "r")
+
+    def test_left_recursion_does_not_hang(self):
+        grammar = self.file("g.peg", 'root r\nr <- r / "a"')
+        result = self.run_cli("peg_parse", grammar, data="a")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recurs", result.stderr.lower())
+
+    def test_nullable_repetition_does_not_hang(self):
+        grammar = self.file("g.peg", 'root r\nr <- ""*')
+        result = self.run_cli("peg_parse", grammar, data="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any(s in result.stderr.lower() for s in ("progress", "empty", "zero", "nullable")))
+
+    def test_unknown_rule_is_diagnosed(self):
+        result = self.run_cli("peg_parse", self.file("g.peg", "root r\nr <- missing"), data="a")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("missing", result.stderr)
+        self.assertIn("g.peg:", result.stderr)
+
+    def test_transform_stdin(self):
+        rules = self.file("r.pegtx", '{ word: simple(w) } => w\n{ words: sequence(ws) } => join(ws, " ")')
+        result = self.run_cli("peg_transform", rules, data='{"words":[{"word":"Hi"},{"word":"World"}]}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), "Hi World")
+
+    def test_transform_output_objects_and_conversion(self):
+        rules = self.file("r.pegtx", '{ count: simple(n) } => { count: int(n), valid: true }')
+        result = self.run_cli("peg_transform", rules, data='{"count":"42"}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"count": 42, "valid": True})
+
+    def test_transform_bad_json(self):
+        result = self.run_cli("peg_transform", self.file("r.pegtx", 'simple(x) => x'), data="not-json")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("JSON", result.stderr)
+
+    def test_transform_invalid_conversion(self):
+        rules = self.file("r.pegtx", '{ n: simple(n) } => int(n)')
+        result = self.run_cli("peg_transform", rules, data='{"n":"nope"}')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("r.pegtx:", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_transform_unknown_binding_is_diagnosed(self):
+        rules = self.file("r.pegtx", '{ n: simple(n) } => missing')
+        result = self.run_cli("peg_transform", rules, data='{"n":"1"}')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("missing", result.stderr)
+
+    def test_transform_malformed_rules_exit_code(self):
+        rules = self.file("r.pegtx", '{ n: simple(n) => n')
+        for flags in ([], ["--json"]):
+            result = self.run_cli("peg_transform", *flags, rules, data='null')
+            self.assertEqual(result.returncode, 2)
+            if flags:
+                self.assertIn("error", json.loads(result.stdout))
+            else:
+                self.assertEqual(result.stdout, "")
+
+    def test_transform_first_rule_only(self):
+        rules = self.file("r.pegtx", '"a" => "b"\n"b" => "c"')
+        result = self.run_cli("peg_transform", rules, data='"a"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), "b")
+
+    def test_transform_integer_overflow_is_error_not_crash(self):
+        rules = self.file("r.pegtx", 'simple(n) => int(n)')
+        result = self.run_cli("peg_transform", rules, data='9.223372036854776e18')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("panic", result.stderr)
+
+    def test_transform_nonfinite_float_is_error(self):
+        for expression in ('float(n)', '1e999'):
+            rules = self.file("r.pegtx", f'simple(n) => {expression}')
+            result = self.run_cli("peg_transform", rules, data='"nan"')
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn("panic", result.stderr)
+
+    def test_transform_unicode_surrogate_pair(self):
+        rules = self.file("r.pegtx", '"face" => "\\ud83d\\ude00"')
+        result = self.run_cli("peg_transform", rules, data='"face"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), "😀")
+
+    def test_email_diagnostic_renders_deep_rule_trace(self):
+        result = self.run_cli("peg_test", ROOT / "examples/email.peg", "-", data="a@!")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Rule attempts", result.stdout)
+        self.assertIn("FAIL", result.stdout)
+        self.assertIn("word", result.stdout)
+        self.assertNotIn("panic", result.stderr)
+
+    def test_end_to_end_email(self):
+        result = self.run_cli("peg_parse", ROOT / "examples/email.peg", data="a dot b at gmail dot com")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        clean = self.run_cli("peg_transform", ROOT / "examples/email.pegtx", data=result.stdout)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertEqual(json.loads(clean.stdout), "a.b@gmail.com")
+
+    def test_shipped_embedded_tests(self):
+        grammars = sorted((ROOT / "examples").glob("*.peg"))
+        self.assertGreaterEqual(len(grammars), 2)
+        for grammar in grammars:
+            result = self.run_cli("peg_test", grammar)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("passed", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

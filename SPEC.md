@@ -6,7 +6,7 @@ Three commands share a Zig 0.16.0 library:
 - `peg_test GRAMMAR`: run embedded tests; `peg_test GRAMMAR INPUT`: diagnose that document, with grammar source locations and a bounded attempt trace.
 - `peg_transform RULES [TREE|-]`: JSON tree in and out, recursive bottom-up transformation.
 
-`.peg` grammar files and `.pegtx` transform files are text. Missing input for parse/transform means stdin. Exit 0 for success, 1 for document/test/transform failure, 2 for invalid usage or configuration. `--help` and `--json` are supported. Ordinary parse/transform diagnostics go to stderr to keep pipelines clean; --json emits structured diagnostics to stdout.
+`.peg` grammar files and `.pegtx` transform files are text. Missing input for parse/transform means stdin. Exit 0 for success, 1 for document mismatch/test failure/runtime transform failure, 2 for invalid usage, unreadable files, malformed input JSON, or invalid grammar/transform definitions. `--help` and `--json` are supported. Ordinary parse/transform diagnostics go to stderr to keep pipelines clean; --json emits structured diagnostics to stdout.
 
 ## Grammar
 

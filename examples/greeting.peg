@@ -1,0 +1,15 @@
+# Grammar and regression tests live together.
+root greeting
+greeting <- salutation:("Hello" / "Hi") " "+ who:[a-zA-Z]+ excited:"!"? newline?
+newline <- "\r\n" / "\n"
+
+@test "hello" {
+  input: "Hello World"
+  expect: { salutation: "Hello", who: "World", excited: "" }
+}
+@test "excited" {
+  input: "Hi Nigel!\n"
+  expect: { salutation: "Hi", who: "Nigel", excited: "!" }
+}
+@test "missing name" { input: "Hi " reject: true }
+@test "unexpected punctuation" { input: "Hi Nigel?" reject: true }

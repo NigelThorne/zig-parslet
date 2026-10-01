@@ -1,0 +1,6 @@
+# Equivalent to the operations in Ruby Parslet's EmailSanitizer example.
+{ dot: simple(d), word: simple(w) } => concat(".", w)
+{ word: simple(w) } => w
+{ username: sequence(parts) } => concat(join(parts), "@")
+{ username: simple(name) } => concat(name, "@")
+{ email: sequence(parts) } => join(parts)

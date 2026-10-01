@@ -1,0 +1,26 @@
+# Inspired by kschiess/parslet example/email_parser.rb.
+# Demonstrates named captures, ordered choices, repetition and nested trees.
+# This is an illustrative sanitizer, not an RFC-complete email validator.
+root document
+document <- email newline?
+email <- email:(username:words ws at ws words)
+words <- word (separator word)*
+word <- word:[a-z0-9]+ ws
+separator <- dot:dot ws / space
+at <- "@" / (dash ("at" / "AT") dash)
+dot <- "." / (dash ("dot" / "DOT") dash)
+dash <- [_-]?
+space <- [ \t]+
+ws <- space?
+newline <- "\r\n" / "\n"
+
+@test "simple address" {
+  input: "a@gmail.com"
+  expect: { email: [ { username: { word: "a" } }, { word: "gmail" }, { dot: ".", word: "com" } ] }
+}
+@test "obfuscated address" {
+  input: "a dot b at gmail dot com"
+  expect: { email: [ { username: [ { word: "a" }, { dot: "dot", word: "b" } ] }, { word: "gmail" }, { dot: "dot", word: "com" } ] }
+}
+@test "missing domain" { input: "a@" reject: true }
+@test "invalid character" { input: "a@!" reject: true }

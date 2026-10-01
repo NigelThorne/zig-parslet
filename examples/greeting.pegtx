@@ -1,0 +1,3 @@
+# Children transform first. The first matching rule at a node wins.
+{ salutation: simple(s), who: simple(w), excited: "!" } => { greeting: concat(s, " ", w), excited: true }
+{ salutation: simple(s), who: simple(w), excited: "" } => { greeting: concat(s, " ", w), excited: false }
