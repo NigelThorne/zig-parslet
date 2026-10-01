@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Black-box acceptance tests. Build first: mise exec -- zig build."""
+import csv
+import io
 import json
 import pathlib
 import random
@@ -450,6 +452,72 @@ class CliTests(unittest.TestCase):
     def test_json_example_document_round_trip(self):
         document = (ROOT / "examples/json.json").read_text()
         self.assertEqual(json.loads(self.json_round_trip(document)), json.loads(document))
+
+    def csv_rows(self, document):
+        parsed = self.run_cli("peg_parse", ROOT / "examples/csv.peg", data=document)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        transformed = self.run_cli("peg_transform", ROOT / "examples/csv.pegtx", data=parsed.stdout)
+        self.assertEqual(transformed.returncode, 0, transformed.stderr)
+        return json.loads(transformed.stdout)
+
+    def test_csv_empty_fields_rows_and_line_endings(self):
+        documents = ['', '\n', '\r\n', '\r', '\n\n', ',', ',,', '""',
+                     'a', 'a\n', 'a,b\r\nc,d', 'a\rb\r', 'a\n\nb\n',
+                     '  a  ,00123,false,null', 'a,b,', '\ufeffname,value\n']
+        for document in documents:
+            with self.subTest(document=document):
+                expected = list(csv.reader(io.StringIO(document, newline=''), strict=True))
+                self.assertEqual(self.csv_rows(document), expected)
+
+    def test_csv_quoted_commas_quotes_and_multiline_cells(self):
+        documents = ['"a,b",c', '"say ""hello""",x', '""""',
+                     '"line one\nline two",end\n', '"a\r\nb",c\r\n',
+                     '"é😀",00123', '"a\rb",c', 'x,"",y']
+        for document in documents:
+            with self.subTest(document=document):
+                expected = list(csv.reader(io.StringIO(document, newline=''), strict=True))
+                self.assertEqual(self.csv_rows(document), expected)
+
+    def test_csv_generated_corpus_matches_python(self):
+        rng = random.Random(149031)
+        cells = ['', 'plain', '00123', 'false', 'null', ' a ', ',', '"',
+                 'a,b', 'say "hello"', 'line\nnext', 'line\r\nnext', 'é😀']
+        for index in range(60):
+            rows = [[rng.choice(cells) for _ in range(rng.randrange(5))]
+                    for _ in range(rng.randrange(7))]
+            stream = io.StringIO(newline='')
+            csv.writer(stream, lineterminator='\r\n' if index % 2 else '\n').writerows(rows)
+            document = stream.getvalue()
+            with self.subTest(index=index, rows=rows):
+                self.assertEqual(self.csv_rows(document), rows)
+
+    def test_csv_rejects_invalid_quoting(self):
+        for document in ('"unterminated', 'a,"unterminated', '"a"x,b',
+                         'unquoted"quote,b', '"a" "b"', '"""'):
+            with self.subTest(document=document):
+                result = self.run_cli("peg_parse", "--json", ROOT / "examples/csv.peg", data=document)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["error"]["kind"], "input")
+
+    def test_csv_unterminated_quote_points_to_eof(self):
+        document = 'name,"unfinished'
+        result = self.run_cli("peg_parse", "--json", ROOT / "examples/csv.peg", data=document)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["error"]["offset"], len(document))
+
+    def test_csv_rejects_invalid_utf8_in_cells(self):
+        for document in (b'a,\x80', b'"a\xff"', b'\xc0\xaf,b', b'"\xed\xa0\x80"'):
+            result = subprocess.run([str(BIN / "peg_parse"), "--json", str(ROOT / "examples/csv.peg")],
+                                    input=document, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout)["error"]["kind"], "input")
+
+    def test_csv_example_document(self):
+        document = (ROOT / "examples/csv.csv").read_text()
+        expected = list(csv.reader(io.StringIO(document, newline=''), strict=True))
+        actual = self.csv_rows(document)
+        self.assertEqual(actual, expected)
+        self.assertIn('00123', actual[1])
 
     def test_shipped_embedded_tests(self):
         grammars = sorted((ROOT / "examples").glob("*.peg"))

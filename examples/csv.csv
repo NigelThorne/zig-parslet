@@ -1,0 +1,5 @@
+id,name,notes,active
+00123,"Thorne, Nigel","Said ""hello""",true
+00456,Zoë,"Two lines:
+first and second",false
+00789,😀,,null

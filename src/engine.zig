@@ -712,7 +712,10 @@ const Runtime = struct {
                     const maybe = try self.matchExpr(x.child, p, depth + 1);
                     if (self.limit_message != null) break :blk null;
                     const m = maybe orelse {
-                        if (n >= x.min) self.restoreFailure(saved);
+                        // A normal stop failed at the next item's start. Keep
+                        // deeper failures from incomplete repeated items, but
+                        // optional expressions still discard their probes.
+                        if (n >= x.min and (x.max != null or self.failed.offset <= p)) self.restoreFailure(saved);
                         break;
                     };
                     if (m.pos == p and x.max == null) {

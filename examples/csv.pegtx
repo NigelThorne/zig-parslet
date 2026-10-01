@@ -1,0 +1,15 @@
+# Decode quoted fragments with ordinary recursive rules, no CSV-specific helper.
+{ text: simple(s) } => s
+{ escaped_quote: "\"\"" } => "\""
+{ quoted: sequence(parts) } => join(parts)
+{ quoted: "" } => ""
+{ cell: simple(s) } => s
+
+{ blank_row: simple(ending) } => []
+{ row: sequence(cells) } => cells
+{ row: simple(cell) } => [cell]
+
+# A final, unterminated record is a singleton; repeated records form arrays.
+{ csv: "" } => []
+{ csv: sequence(row) } => [row]
+{ csv: subtree(rows) } => rows

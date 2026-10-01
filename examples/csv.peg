@@ -1,0 +1,35 @@
+# UTF-8 CSV with strict quoting. Cells remain strings; no header or type inference.
+# Empty document => []; blank record => []; quoted empty field => [""].
+# LF, CRLF and CR record endings are accepted and quoted newlines preserved.
+root document
+document <- csv:(record* (final_record / !.))
+record <- blank_row:newline / row:(fields newline)
+final_record <- &. row:fields !.
+fields <- field ("," field)*
+field <- cell:(quoted / unquoted)
+unquoted <- !"\"" (unquoted_ascii / utf8)*
+unquoted_ascii <- [^,"\r\n\x80-\xff]
+quoted <- "\"" quoted:(escaped_quote / text)* "\""
+escaped_quote <- escaped_quote:"\"\""
+text <- text:([\x00-\x21\x23-\x7f] / utf8)+
+newline <- "\r\n" / "\n" / "\r"
+
+# Validate text bytes so captures cannot become non-string byte arrays.
+utf8 <- [\xc2-\xdf] continuation
+      / [\xe0] [\xa0-\xbf] continuation
+      / [\xe1-\xec\xee-\xef] continuation continuation
+      / [\xed] [\x80-\x9f] continuation
+      / [\xf0] [\x90-\xbf] continuation continuation
+      / [\xf1-\xf3] continuation continuation continuation
+      / [\xf4] [\x80-\x8f] continuation continuation
+continuation <- [\x80-\xbf]
+
+@test "empty document" { input: "" expect: { csv: "" } }
+@test "blank record" { input: "\n" expect: { csv: [{ blank_row: "\n" }] } }
+@test "one field without newline" { input: "00123" expect: { csv: { row: { cell: "00123" } } } }
+@test "empty fields" { input: "," expect: { csv: { row: [{ cell: "" }, { cell: "" }] } } }
+@test "quoted comma" { input: "\"a,b\"" expect: { csv: { row: { cell: { quoted: [{ text: "a,b" }] } } } } }
+@test "quoted empty field" { input: "\"\"" expect: { csv: { row: { cell: { quoted: "" } } } } }
+@test "unclosed quote" { input: "\"unfinished" reject: true }
+@test "quote inside unquoted field" { input: "a\"b" reject: true }
+@test "text after closing quote" { input: "\"a\"b" reject: true }

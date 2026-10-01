@@ -56,6 +56,28 @@ The grammar parses JSON into a capture tree. The transform then decodes strings,
 
 This example validates UTF-8 and requires paired UTF-16 surrogate escapes. It rejects raw controls, malformed escapes, invalid numbers and trailing commas. It uses explicit byte ranges for Unicode validation; the PEG engine itself remains byte-oriented. The normal parser depth/work limits still apply.
 
+## CSV to rows
+
+```sh
+./zig-out/bin/peg_test examples/csv.peg
+./zig-out/bin/peg_parse examples/csv.peg examples/csv.csv |
+  ./zig-out/bin/peg_transform examples/csv.pegtx
+```
+
+The result is an array of rows, each containing strings. Quoted commas, doubled quotes and multiline cells work. LF, CRLF and CR record endings are accepted. Newlines inside quoted cells are preserved.
+
+| Input | Result |
+| --- | --- |
+| Empty document | `[]` |
+| One blank line | `[[]]` |
+| `""` | `[[""]]` |
+| `,` | `[["", ""]]` |
+| `00123,false` | `[["00123", "false"]]` |
+
+No header inference, type conversion, trimming or BOM stripping occurs. Rows may have different field counts. A final newline does not create an extra row. Quoting is strict: quotes must begin a field, and closing quotes must be followed by a delimiter, record ending or EOF. The example requires valid UTF-8.
+
+The transform uses only existing pattern rules and `join`. No CSV-specific runtime helper is involved.
+
 ## Commands
 
 | Command | Input | Output |
@@ -195,7 +217,7 @@ Transform strings use JSON escapes, including Unicode escapes. Numeric literals 
 
 ## Diagnostics and limits
 
-`peg_parse` reports the document failure location and expected alternatives. For example, `"yes" / "no"` reports `expected literal "yes" or literal "no"`. Tied failures retain up to 16 distinct expectations; repeated expectations appear once, and truncation is reported. Failures from successful choices and optional/lookahead probes do not leak into later errors.
+`peg_parse` reports the document failure location and expected alternatives. For example, `"yes" / "no"` reports `expected literal "yes" or literal "no"`. Tied failures retain up to 16 distinct expectations; repeated expectations appear once, and truncation is reported. Failures from successful choices and optional/lookahead probes do not leak into later errors. Repetition ignores normal termination at the next item's start, but retains deeper failures from incomplete items, such as an unfinished quoted CSV field.
 
 `peg_test` also highlights the grammar expressions for those alternatives and shows a bounded trace of rule attempts. A successful attempt can later be discarded by backtracking; the trace is not a list of committed matches.
 
@@ -214,7 +236,7 @@ mise exec -- zig build
 python3 tests/cli_test.py
 ```
 
-The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. JSON round trips include a reproducible 60-document generated corpus checked against Python's JSON decoder, plus malformed document, Unicode and exact numeric-token cases. No Python package installation is needed.
+The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. JSON round trips include a reproducible 60-document generated corpus checked against Python's JSON decoder, plus malformed document, Unicode and exact numeric-token cases. CSV has a separate reproducible 60-document corpus checked against Python's CSV reader, with empty fields, mixed row widths, quotes and multiline data. No Python package installation is needed.
 
 ## Library
 

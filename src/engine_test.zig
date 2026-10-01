@@ -171,6 +171,27 @@ test "successful probes do not pollute required failure diagnostics" {
     try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "required") != null);
 }
 
+test "partial repeated items keep deep failures while normal stops and optional probes do not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const repeated = try compileOk(a, "root r\nr <- (\"ab\")* \"c\"", false);
+    const partial = (try engine.parse(a, &repeated, "aX", false)).diagnostic.?;
+    try std.testing.expectEqual(@as(usize, 1), partial.offset);
+    try std.testing.expect(std.mem.indexOf(u8, partial.message, "ab") != null);
+
+    const stopped = try compileOk(a, "root r\nr <- \"a\"* \"b\"", false);
+    const normal = (try engine.parse(a, &stopped, "aaaX", false)).diagnostic.?;
+    try std.testing.expectEqual(@as(usize, 3), normal.offset);
+    try std.testing.expectEqual(@as(usize, 1), normal.expected.len);
+    try std.testing.expectEqualStrings("expected literal \"b\"", normal.message);
+
+    const optional = try compileOk(a, "root r\nr <- (\"ab\")? \"c\"", false);
+    const skipped = (try engine.parse(a, &optional, "aX", false)).diagnostic.?;
+    try std.testing.expectEqual(@as(usize, 0), skipped.offset);
+    try std.testing.expectEqualStrings("expected literal \"c\"", skipped.message);
+}
+
 test "grammar and runtime expression nesting are bounded" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
