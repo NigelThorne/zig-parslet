@@ -260,9 +260,32 @@ mise exec -- zig fmt --check build.zig src
 mise exec -- zig build test
 mise exec -- zig build
 python3 tests/cli_test.py
+python3 tests/fuzz_test.py
 ```
 
 The Python standard-library tests exercise the real executables, including stdin, pipelines, embedded tests, diagnostics, bad arguments and transform errors. JSON round trips include a reproducible 60-document generated corpus checked against Python's JSON decoder, plus malformed document, Unicode and exact numeric-token cases. CSV has a separate reproducible 60-document corpus checked against Python's CSV reader, with empty fields, mixed row widths, quotes and multiline data. XML adds a reproducible 60-document corpus compared with Python's ElementTree, plus mismatched tags, malformed UTF-8, entities and mixed-content cases. No Python package installation is needed.
+
+### Reproducible fuzz/property tests
+
+`tests/fuzz_test.py` runs bounded randomized checks against the built executables. It uses only Python's standard library. Each subprocess has a five-second timeout; failure reports include the seed, case and payload.
+
+- Compare generated PEG operator combinations with an independent recognition model, across all a/b strings through length two, an outsider byte, and a longer random input.
+- Mutate grammar and transform definitions, checking exit codes, JSON output and diagnostic escaping. Grammar mutations also exercise embedded-test loading.
+- Compare mutated JSON acceptance and values with Python's JSON decoder, enforcing this project's strict Unicode-scalar policy and excluding non-JSON constants.
+- Check successful mutated XML pipelines against ElementTree. Unsupported XML features may be rejected; a transform rejection after structural parsing must also be invalid XML.
+- Exercise compiler nesting, left recursion, nullable repetition, parse depth and exponential-backtracking work guards.
+
+```sh
+# Default seed 8173, 100 cases per randomized test.
+python3 tests/fuzz_test.py
+
+# Larger run or exact replay of a reported seed/method.
+PEG_FUZZ_SEED=42 PEG_FUZZ_CASES=500 python3 tests/fuzz_test.py
+PEG_FUZZ_SEED=42 PEG_FUZZ_CASES=500 python3 tests/fuzz_test.py \
+  FuzzTests.test_mutated_json_matches_strict_python
+```
+
+Case counts must be between 1 and 10,000. Rebuild in Debug or ReleaseSafe to exercise that configuration; the Python tests use `zig-out/bin`. A run is finite and deterministic for a given Python runtime, seed and count. This is mutation/property testing, not coverage-guided fuzzing, a benchmark, or proof that no defects remain. CSV's generated valid-document comparisons remain in `cli_test.py`.
 
 ## Library
 
