@@ -287,6 +287,32 @@ PEG_FUZZ_SEED=42 PEG_FUZZ_CASES=500 python3 tests/fuzz_test.py \
 
 Case counts must be between 1 and 10,000. Rebuild in Debug or ReleaseSafe to exercise that configuration; the Python tests use `zig-out/bin`. A run is finite and deterministic for a given Python runtime, seed and count. This is mutation/property testing, not coverage-guided fuzzing, a benchmark, or proof that no defects remain. CSV's generated valid-document comparisons remain in `cli_test.py`.
 
+## CI and releases
+
+GitHub Actions runs formatting, unit tests, CLI acceptance tests and the deterministic fuzz suite on Ubuntu 24.04 and macOS 15, in Debug and ReleaseSafe. CI runs for pull requests and pushes to `main`, and can be started manually. Action dependencies are pinned to commit hashes. The Zig version comes from `mise.toml`.
+
+Pushing a stable version tag such as `v0.1.0` starts the release workflow. It requires a tag on `main` history, reruns the full CI matrix, then cross-compiles ReleaseSafe archives for:
+
+| Archive target | Platform |
+| --- | --- |
+| `x86_64-linux-musl` | Linux, Intel/AMD 64-bit, static binaries |
+| `aarch64-linux-musl` | Linux, ARM64, static binaries |
+| `x86_64-macos` | macOS, Intel |
+| `aarch64-macos` | macOS, Apple Silicon |
+
+Every `.tar.gz` includes the three commands, examples, README and specification. Releases include `SHA256SUMS`; after downloading the archives and checksum file, run `sha256sum -c SHA256SUMS`, or `shasum -a 256 -c SHA256SUMS` on macOS. Native CI covers the hosted Linux/macOS runners, not every cross-compiled architecture. Windows builds, macOS signing/notarization and installation packages are not included.
+
+Only the final publishing job has `contents: write`. It does not check out source or execute binaries. It publishes artifacts from the same workflow run and checks that the tag still identifies the tested commit. CI/build jobs are read-only and do not retain checkout credentials. There is no deployment on an ordinary commit, no automatic tag creation, and no overwrite of an existing release.
+
+To release an explicitly approved version from a verified `main` commit:
+
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+Do not move published tags. A failed build creates no release. If publication itself fails, inspect GitHub for a partial release before taking further action; reruns deliberately do not overwrite releases. Correct a shipped defect with a new version. Reverting or removing the workflow stops future automation but does not remove already-public history or release downloads.
+
 ## Library
 
 `src/root.zig` exports `engine`, `transform`, `Diagnostic`, `Expectation` and `TraceEvent`. APIs accept an allocator; use an arena for each operation and keep source/input buffers alive while using the results. See [SPEC.md](SPEC.md) for interfaces and syntax details.
