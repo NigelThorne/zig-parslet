@@ -6,11 +6,12 @@ document <- ws value
 value <- (object / array / string / number / boolean / null) ws
 ws <- [ \t\r\n]*
 
-object <- "{" ws (json_object:members / json_empty_object:"") "}"
+# Empty branches require their closing delimiter, preserving deeper failures.
+object <- "{" ws (json_object:members / json_empty_object:&"}") "}"
 members <- member ("," ws member)*
 member <- entry:(key:string ws ":" ws value:value)
 
-array <- "[" ws (json_array:elements / json_empty_array:"") "]"
+array <- "[" ws (json_array:elements / json_empty_array:&"]") "]"
 elements <- element ("," ws element)*
 element <- element:value
 

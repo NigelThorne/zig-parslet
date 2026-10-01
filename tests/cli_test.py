@@ -418,6 +418,14 @@ class CliTests(unittest.TestCase):
             with self.subTest(index=index, document=document):
                 self.assertEqual(json.loads(self.json_round_trip(document)), expected)
 
+    def test_json_missing_value_diagnostic_points_after_colon(self):
+        for document in ('{"count":}', '[{"a":}]'):
+            result = self.run_cli("peg_parse", "--json", ROOT / "examples/json.peg", data=document)
+            self.assertEqual(result.returncode, 1)
+            error = json.loads(result.stdout)["error"]
+            self.assertEqual(error["offset"], document.index('}'))
+            self.assertIn('"null"', error["message"])
+
     def test_json_rejects_malformed_documents(self):
         documents = ['', '[1,]', '{"a":1,}', '[1 2]', '{"a" 1}',
                      '{a:1}', '01', '-01', '+1', '1.', '.1', '1e', '1e+',
