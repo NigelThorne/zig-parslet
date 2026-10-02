@@ -1,6 +1,7 @@
 const std = @import("std");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
+const Recorder = @import("trace.zig").Recorder;
 
 pub const TestCase = struct {
     name: []const u8,
@@ -15,8 +16,8 @@ pub const TestCase = struct {
 const ClassRange = struct { first: u8, last: u8 };
 
 const Expr = union(enum) {
-    literal: struct { text: []const u8, offset: usize },
-    class: struct { ranges: []const ClassRange, inverted: bool, offset: usize, expected: []const u8 },
+    literal: struct { text: []const u8, offset: usize, end: usize },
+    class: struct { ranges: []const ClassRange, inverted: bool, offset: usize, end: usize, expected: []const u8 },
     any: usize,
     reference: struct { name: []const u8, offset: usize },
     sequence: []const *Expr,
@@ -27,7 +28,7 @@ const Expr = union(enum) {
     capture: struct { name: []const u8, child: *Expr, offset: usize },
 };
 
-const Rule = struct { name: []const u8, expr: *Expr, offset: usize };
+const Rule = struct { name: []const u8, expr: *Expr, offset: usize, end: usize };
 
 pub const Grammar = struct {
     tests: []const TestCase,
@@ -39,6 +40,7 @@ pub const ParseResult = struct {
     value: ?std.json.Value = null,
     diagnostic: ?common.Diagnostic = null,
     trace: []const common.TraceEvent = &.{},
+    summary: ?common.TraceSummary = null,
 };
 
 const GrammarParser = struct {
@@ -220,6 +222,7 @@ const GrammarParser = struct {
             .ranges = try ranges.toOwnedSlice(self.allocator),
             .inverted = inverted,
             .offset = at,
+            .end = self.pos,
             .expected = try std.fmt.allocPrint(self.allocator, "expected character class {s}", .{self.source[at..self.pos]}),
         } });
     }
@@ -228,7 +231,7 @@ const GrammarParser = struct {
         self.skipSpace();
         if (self.eof()) return self.fail(self.pos, "expected expression");
         const at = self.pos;
-        if (self.peek() == '"' or self.peek() == '\'') return self.node(.{ .literal = .{ .text = try self.parseString(), .offset = at } });
+        if (self.peek() == '"' or self.peek() == '\'') return self.node(.{ .literal = .{ .text = try self.parseString(), .offset = at, .end = self.pos } });
         if (self.peek() == '[') return self.parseClass(at);
         if (self.peek() == '.') {
             self.pos += 1;
@@ -480,7 +483,9 @@ const GrammarParser = struct {
             self.skipSpace();
             if (!self.starts("<-")) return self.fail(self.pos, "expected '<-'");
             self.pos += 2;
-            try self.rules.append(self.allocator, .{ .name = name, .expr = try self.expression(), .offset = at });
+            const expr = try self.expression();
+            const end = at + std.mem.trimEnd(u8, self.source[at..self.pos], " \t\r\n").len;
+            try self.rules.append(self.allocator, .{ .name = name, .expr = expr, .offset = at, .end = end });
         }
         const root_name = self.root_name orelse return self.fail(0, "missing root declaration");
         var root: ?usize = null;
@@ -531,255 +536,316 @@ pub fn compile(allocator: std.mem.Allocator, source: []const u8, load_tests: boo
 
 const Match = struct { pos: usize, value: std.json.Value, structured: bool };
 const Active = struct { rule: usize, pos: usize };
-const Runtime = struct {
-    allocator: std.mem.Allocator,
-    grammar: *const Grammar,
-    input: []const u8,
-    failed: Failure = .{},
-    work: usize = 0,
-    trace_enabled: bool,
-    traces: std.ArrayList(common.TraceEvent) = .empty,
-    active: std.ArrayList(Active) = .empty,
-    limit_message: ?[]const u8 = null,
+fn Runtime(comptime authoring: bool) type {
+    return struct {
+        const Self = @This();
+        allocator: std.mem.Allocator,
+        grammar: *const Grammar,
+        input: []const u8,
+        failed: Failure = .{},
+        work: usize = 0,
+        observer: if (authoring) Recorder else void = if (authoring) undefined else {},
+        active: std.ArrayList(Active) = .empty,
+        limit_message: ?[]const u8 = null,
 
-    fn emptyString() std.json.Value {
-        return .{ .string = "" };
-    }
-    // Immutable slices make snapshots safe across speculative branches and probes.
-    const Failure = struct {
-        offset: usize = 0,
-        expected: []const common.Expectation = &.{},
-        truncated: bool = false,
-    };
-
-    fn failure(self: *Runtime) Failure {
-        return self.failed;
-    }
-    fn restoreFailure(self: *Runtime, saved: Failure) void {
-        self.failed = saved;
-    }
-    fn failAt(self: *Runtime, pos: usize, grammar_offset: usize, expected: []const u8) !?Match {
-        if (pos < self.failed.offset) return null;
-        if (pos > self.failed.offset) self.failed = .{ .offset = pos };
-        for (self.failed.expected) |item| {
-            if (std.mem.eql(u8, item.message, expected)) return null;
+        fn emptyString() std.json.Value {
+            return .{ .string = "" };
         }
-        if (self.failed.expected.len == 16) {
-            self.failed.truncated = true;
-            return null;
-        }
-        const items = try self.allocator.alloc(common.Expectation, self.failed.expected.len + 1);
-        @memcpy(items[0..self.failed.expected.len], self.failed.expected);
-        items[self.failed.expected.len] = .{
-            .message = expected,
-            .grammar_offset = grammar_offset,
-            .rule = if (self.active.items.len == 0) null else self.grammar.rules[self.active.items[self.active.items.len - 1].rule].name,
+        // Immutable slices make snapshots safe across speculative branches and probes.
+        const Failure = struct {
+            offset: usize = 0,
+            expected: []const common.Expectation = &.{},
+            truncated: bool = false,
         };
-        self.failed.expected = items;
-        return null;
-    }
 
-    fn diagnostic(self: *Runtime) !common.Diagnostic {
-        const first: ?common.Expectation = if (self.failed.expected.len > 0) self.failed.expected[0] else null;
-        var message: std.Io.Writer.Allocating = .init(self.allocator);
-        if (self.limit_message) |limit| {
-            try message.writer.writeAll(limit);
-        } else if (self.failed.expected.len == 0) {
-            try message.writer.writeAll("input did not match grammar");
-        } else {
-            for (self.failed.expected, 0..) |item, index| {
-                if (index != 0) try message.writer.writeAll(" or ");
-                const text = if (index != 0 and std.mem.startsWith(u8, item.message, "expected ")) item.message[9..] else item.message;
-                try message.writer.writeAll(text);
+        fn failure(self: *Self) Failure {
+            return self.failed;
+        }
+        fn restoreFailure(self: *Self, saved: Failure) void {
+            self.failed = saved;
+        }
+        fn failAt(self: *Self, pos: usize, grammar_offset: usize, grammar_end: usize, expected: []const u8) !?Match {
+            if (authoring) self.observer.touch(pos);
+            if (pos < self.failed.offset) return null;
+            if (pos > self.failed.offset) self.failed = .{ .offset = pos };
+            for (self.failed.expected) |item| {
+                if (std.mem.eql(u8, item.message, expected)) return null;
             }
-            if (self.failed.truncated) try message.writer.writeAll(" or other alternatives (list capped at 16)");
-        }
-        return .{
-            .kind = if (self.limit_message != null) .limit else .input,
-            .offset = self.failed.offset,
-            .message = try message.toOwnedSlice(),
-            .grammar_offset = if (first) |item| item.grammar_offset else null,
-            .rule = if (first) |item| item.rule else null,
-            .expected = if (self.limit_message != null) &.{} else self.failed.expected,
-            .expected_truncated = self.limit_message == null and self.failed.truncated,
-        };
-    }
-    fn ruleIndex(self: *Runtime, name: []const u8) usize {
-        for (self.grammar.rules, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
-        unreachable;
-    }
-    fn appendTrace(self: *Runtime, event: common.TraceEvent) !void {
-        if (self.trace_enabled and self.traces.items.len < 1024) try self.traces.append(self.allocator, event);
-    }
-
-    fn matchRule(self: *Runtime, index: usize, pos: usize, depth: usize) anyerror!?Match {
-        if (depth > 256 or self.work > 1_000_000) {
-            self.limit_message = "parse work limit exceeded";
-            return null;
-        }
-        for (self.active.items) |a| if (a.rule == index and a.pos == pos) {
-            self.limit_message = "left recursion detected";
-            return null;
-        };
-        try self.active.append(self.allocator, .{ .rule = index, .pos = pos });
-        defer _ = self.active.pop();
-        const result = try self.matchExpr(self.grammar.rules[index].expr, pos, depth + 1);
-        try self.appendTrace(.{ .rule = self.grammar.rules[index].name, .start = pos, .end = if (result) |m| m.pos else pos, .matched = result != null, .depth = depth });
-        return result;
-    }
-
-    fn classContains(ranges: []const ClassRange, byte: u8) bool {
-        for (ranges) |range| if (byte >= range.first and byte <= range.last) return true;
-        return false;
-    }
-
-    fn mergeSequence(self: *Runtime, values: []const Match, start: usize, end: usize) !Match {
-        var count: usize = 0;
-        var has_array = false;
-        var has_object = false;
-        for (values) |v| if (v.structured) {
-            count += 1;
-            if (v.value == .array) has_array = true else if (v.value == .object) has_object = true;
-        };
-        if (count == 0) return .{ .pos = end, .value = .{ .string = self.input[start..end] }, .structured = false };
-        if (has_array) {
-            var array = std.json.Array.init(self.allocator);
-            for (values) |v| if (v.structured) switch (v.value) {
-                .array => |a| try array.appendSlice(a.items),
-                else => try array.append(v.value),
+            if (self.failed.expected.len == 16) {
+                self.failed.truncated = true;
+                return null;
+            }
+            const items = try self.allocator.alloc(common.Expectation, self.failed.expected.len + 1);
+            @memcpy(items[0..self.failed.expected.len], self.failed.expected);
+            items[self.failed.expected.len] = .{
+                .message = expected,
+                .grammar_offset = grammar_offset,
+                .grammar_end = grammar_end,
+                .attempt_id = if (authoring) self.observer.currentId() else null,
+                .rule = if (self.active.items.len == 0) null else self.grammar.rules[self.active.items[self.active.items.len - 1].rule].name,
             };
-            return .{ .pos = end, .value = .{ .array = array }, .structured = true };
-        }
-        if (has_object) {
-            var object: std.json.ObjectMap = .empty;
-            for (values) |v| if (v.structured) switch (v.value) {
-                .object => |o| {
-                    var it = o.iterator();
-                    while (it.next()) |entry| try object.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
-                },
-                else => {},
-            };
-            return .{ .pos = end, .value = .{ .object = object }, .structured = true };
-        }
-        for (values) |v| if (v.structured) return .{ .pos = end, .value = v.value, .structured = true };
-        unreachable;
-    }
-
-    fn matchExpr(self: *Runtime, expr: *const Expr, pos: usize, depth: usize) anyerror!?Match {
-        self.work += 1;
-        if (depth > 256 or self.work > 1_000_000) {
-            self.limit_message = "parse work limit exceeded";
+            self.failed.expected = items;
             return null;
         }
-        if (self.limit_message != null) return null;
-        return switch (expr.*) {
-            .literal => |x| blk: {
-                var matched: usize = 0;
-                while (matched < x.text.len and pos + matched < self.input.len and self.input[pos + matched] == x.text[matched]) matched += 1;
-                if (matched == x.text.len) break :blk Match{ .pos = pos + matched, .value = .{ .string = self.input[pos .. pos + matched] }, .structured = false };
-                const expected = try std.fmt.allocPrint(self.allocator, "expected literal \"{s}\"", .{x.text});
-                break :blk self.failAt(pos + matched, x.offset, expected);
-            },
-            .any => |at| if (pos < self.input.len) .{ .pos = pos + 1, .value = .{ .string = self.input[pos .. pos + 1] }, .structured = false } else self.failAt(pos, at, "expected any byte"),
-            .class => |x| if (pos < self.input.len and (classContains(x.ranges, self.input[pos]) != x.inverted)) .{ .pos = pos + 1, .value = .{ .string = self.input[pos .. pos + 1] }, .structured = false } else self.failAt(pos, x.offset, x.expected),
-            .reference => |x| self.matchRule(self.ruleIndex(x.name), pos, depth),
-            .choice => |xs| blk: {
-                const saved = self.failure();
-                for (xs) |x| if (try self.matchExpr(x, pos, depth + 1)) |m| {
-                    self.restoreFailure(saved);
-                    break :blk m;
+
+        fn diagnostic(self: *Self) !common.Diagnostic {
+            const first: ?common.Expectation = if (self.failed.expected.len > 0) self.failed.expected[0] else null;
+            var message: std.Io.Writer.Allocating = .init(self.allocator);
+            if (self.limit_message) |limit| {
+                try message.writer.writeAll(limit);
+            } else if (self.failed.expected.len == 0) {
+                try message.writer.writeAll("input did not match grammar");
+            } else {
+                for (self.failed.expected, 0..) |item, index| {
+                    if (index != 0) try message.writer.writeAll(" or ");
+                    const text = if (index != 0 and std.mem.startsWith(u8, item.message, "expected ")) item.message[9..] else item.message;
+                    try message.writer.writeAll(text);
+                }
+                if (self.failed.truncated) try message.writer.writeAll(" or other alternatives (list capped at 16)");
+            }
+            return .{
+                .kind = if (self.limit_message != null) .limit else .input,
+                .offset = self.failed.offset,
+                .message = try message.toOwnedSlice(),
+                .grammar_offset = if (first) |item| item.grammar_offset else null,
+                .grammar_end = if (first) |item| item.grammar_end else null,
+                .rule = if (first) |item| item.rule else null,
+                .expected = if (self.limit_message != null) &.{} else self.failed.expected,
+                .expected_truncated = self.limit_message == null and self.failed.truncated,
+            };
+        }
+        fn ruleIndex(self: *Self, name: []const u8) usize {
+            for (self.grammar.rules, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
+            unreachable;
+        }
+        fn matchRule(self: *Self, index: usize, pos: usize, depth: usize) anyerror!?Match {
+            var result: ?Match = null;
+            if (authoring) {
+                const rule = self.grammar.rules[index];
+                try self.observer.enter(rule.name, rule.offset, rule.end, pos, depth);
+            }
+            defer if (authoring) self.observer.leave(if (result) |m| m.pos else null, self.limit_message != null);
+            if (depth > 256 or self.work > 1_000_000) {
+                self.limit_message = "parse work limit exceeded";
+                return null;
+            }
+            for (self.active.items) |a| if (a.rule == index and a.pos == pos) {
+                self.limit_message = "left recursion detected";
+                return null;
+            };
+            try self.active.append(self.allocator, .{ .rule = index, .pos = pos });
+            defer _ = self.active.pop();
+            result = try self.matchExpr(self.grammar.rules[index].expr, pos, depth + 1);
+            return result;
+        }
+
+        fn classContains(ranges: []const ClassRange, byte: u8) bool {
+            for (ranges) |range| if (byte >= range.first and byte <= range.last) return true;
+            return false;
+        }
+
+        fn mergeSequence(self: *Self, values: []const Match, start: usize, end: usize) !Match {
+            var count: usize = 0;
+            var has_array = false;
+            var has_object = false;
+            for (values) |v| if (v.structured) {
+                count += 1;
+                if (v.value == .array) has_array = true else if (v.value == .object) has_object = true;
+            };
+            if (count == 0) return .{ .pos = end, .value = .{ .string = self.input[start..end] }, .structured = false };
+            if (has_array) {
+                var array = std.json.Array.init(self.allocator);
+                for (values) |v| if (v.structured) switch (v.value) {
+                    .array => |a| try array.appendSlice(a.items),
+                    else => try array.append(v.value),
                 };
-                break :blk null;
-            },
-            .sequence => |xs| blk: {
-                var matches: std.ArrayList(Match) = .empty;
-                var p = pos;
-                for (xs) |x| {
-                    const m = (try self.matchExpr(x, p, depth + 1)) orelse break :blk null;
-                    try matches.append(self.allocator, m);
-                    p = m.pos;
-                }
-                break :blk try self.mergeSequence(matches.items, pos, p);
-            },
-            .not => |x| blk: {
-                const saved = self.failure();
-                const matched = try self.matchExpr(x.child, pos, depth + 1);
-                if (self.limit_message != null) break :blk null;
-                self.restoreFailure(saved);
-                if (matched == null) break :blk Match{ .pos = pos, .value = emptyString(), .structured = false };
-                break :blk self.failAt(pos, x.offset, "expected negative lookahead not to match");
-            },
-            .and_ => |x| blk: {
-                const saved = self.failure();
-                const matched = try self.matchExpr(x.child, pos, depth + 1);
-                if (matched) |_| {
-                    self.restoreFailure(saved);
-                    break :blk Match{ .pos = pos, .value = emptyString(), .structured = false };
-                }
-                break :blk null;
-            },
-            .capture => |x| blk: {
-                const m = (try self.matchExpr(x.child, pos, depth + 1)) orelse break :blk null;
+                return .{ .pos = end, .value = .{ .array = array }, .structured = true };
+            }
+            if (has_object) {
                 var object: std.json.ObjectMap = .empty;
-                try object.put(self.allocator, x.name, if (m.structured) m.value else .{ .string = self.input[pos..m.pos] });
-                break :blk Match{ .pos = m.pos, .value = .{ .object = object }, .structured = true };
-            },
-            .repeat => |x| blk: {
-                var p = pos;
-                var n: usize = 0;
-                var items = std.json.Array.init(self.allocator);
-                var structured = false;
-                var direct: ?Match = null;
-                while (x.max == null or n < x.max.?) {
+                for (values) |v| if (v.structured) switch (v.value) {
+                    .object => |o| {
+                        var it = o.iterator();
+                        while (it.next()) |entry| try object.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                    },
+                    else => {},
+                };
+                return .{ .pos = end, .value = .{ .object = object }, .structured = true };
+            }
+            for (values) |v| if (v.structured) return .{ .pos = end, .value = v.value, .structured = true };
+            unreachable;
+        }
+
+        fn matchExpr(self: *Self, expr: *const Expr, pos: usize, depth: usize) anyerror!?Match {
+            self.work += 1;
+            if (depth > 256 or self.work > 1_000_000) {
+                self.limit_message = "parse work limit exceeded";
+                return null;
+            }
+            if (self.limit_message != null) return null;
+            return switch (expr.*) {
+                .literal => |x| blk: {
+                    var matched: usize = 0;
+                    while (matched < x.text.len and pos + matched < self.input.len and self.input[pos + matched] == x.text[matched]) matched += 1;
+                    if (authoring) self.observer.touch(pos + matched);
+                    if (matched == x.text.len) break :blk Match{ .pos = pos + matched, .value = .{ .string = self.input[pos .. pos + matched] }, .structured = false };
+                    const expected = try std.fmt.allocPrint(self.allocator, "expected literal \"{s}\"", .{x.text});
+                    break :blk self.failAt(pos + matched, x.offset, x.end, expected);
+                },
+                .any => |at| blk: {
+                    if (pos >= self.input.len) break :blk self.failAt(pos, at, at + 1, "expected any byte");
+                    if (authoring) self.observer.touch(pos + 1);
+                    break :blk .{ .pos = pos + 1, .value = .{ .string = self.input[pos .. pos + 1] }, .structured = false };
+                },
+                .class => |x| blk: {
+                    if (pos >= self.input.len or classContains(x.ranges, self.input[pos]) == x.inverted) break :blk self.failAt(pos, x.offset, x.end, x.expected);
+                    if (authoring) self.observer.touch(pos + 1);
+                    break :blk .{ .pos = pos + 1, .value = .{ .string = self.input[pos .. pos + 1] }, .structured = false };
+                },
+                .reference => |x| self.matchRule(self.ruleIndex(x.name), pos, depth),
+                .choice => |xs| blk: {
                     const saved = self.failure();
-                    const maybe = try self.matchExpr(x.child, p, depth + 1);
-                    if (self.limit_message != null) break :blk null;
-                    const m = maybe orelse {
-                        // A normal stop failed at the next item's start. Keep
-                        // deeper failures from incomplete repeated items, but
-                        // optional expressions still discard their probes.
-                        if (n >= x.min and (x.max != null or self.failed.offset <= p)) self.restoreFailure(saved);
-                        break;
-                    };
-                    if (m.pos == p and x.max == null) {
-                        self.limit_message = "zero-width repetition";
-                        break :blk null;
-                    }
-                    direct = m;
-                    if (m.structured) {
-                        structured = true;
-                        switch (m.value) {
-                            .array => |a| try items.appendSlice(a.items),
-                            else => try items.append(m.value),
+                    for (xs) |x| {
+                        const checkpoint = if (authoring) self.observer.next_id else 0;
+                        if (try self.matchExpr(x, pos, depth + 1)) |m| {
+                            self.restoreFailure(saved);
+                            break :blk m;
                         }
+                        if (authoring) self.observer.rollback(checkpoint);
                     }
-                    p = m.pos;
-                    n += 1;
-                }
-                if (n < x.min) break :blk null;
-                if (x.max != null and x.max.? == 1 and direct != null) break :blk direct.?;
-                break :blk Match{ .pos = p, .value = if (structured) .{ .array = items } else .{ .string = self.input[pos..p] }, .structured = structured };
-            },
-        };
-    }
-};
+                    break :blk null;
+                },
+                .sequence => |xs| blk: {
+                    const checkpoint = if (authoring) self.observer.next_id else 0;
+                    var matches: std.ArrayList(Match) = .empty;
+                    var p = pos;
+                    for (xs) |x| {
+                        const m = (try self.matchExpr(x, p, depth + 1)) orelse {
+                            if (authoring) self.observer.rollback(checkpoint);
+                            break :blk null;
+                        };
+                        try matches.append(self.allocator, m);
+                        p = m.pos;
+                    }
+                    break :blk try self.mergeSequence(matches.items, pos, p);
+                },
+                .not => |x| blk: {
+                    const saved = self.failure();
+                    if (authoring) self.observer.probe_depth += 1;
+                    defer {
+                        if (authoring) self.observer.probe_depth -= 1;
+                    }
+                    const matched = try self.matchExpr(x.child, pos, depth + 1);
+                    if (self.limit_message != null) break :blk null;
+                    self.restoreFailure(saved);
+                    if (matched == null) break :blk Match{ .pos = pos, .value = emptyString(), .structured = false };
+                    break :blk self.failAt(pos, x.offset, x.offset + 1, "expected negative lookahead not to match");
+                },
+                .and_ => |x| blk: {
+                    const saved = self.failure();
+                    if (authoring) self.observer.probe_depth += 1;
+                    defer {
+                        if (authoring) self.observer.probe_depth -= 1;
+                    }
+                    const matched = try self.matchExpr(x.child, pos, depth + 1);
+                    if (matched) |_| {
+                        self.restoreFailure(saved);
+                        break :blk Match{ .pos = pos, .value = emptyString(), .structured = false };
+                    }
+                    break :blk null;
+                },
+                .capture => |x| blk: {
+                    const m = (try self.matchExpr(x.child, pos, depth + 1)) orelse break :blk null;
+                    var object: std.json.ObjectMap = .empty;
+                    try object.put(self.allocator, x.name, if (m.structured) m.value else .{ .string = self.input[pos..m.pos] });
+                    break :blk Match{ .pos = m.pos, .value = .{ .object = object }, .structured = true };
+                },
+                .repeat => |x| blk: {
+                    var p = pos;
+                    var n: usize = 0;
+                    var items = std.json.Array.init(self.allocator);
+                    var structured = false;
+                    var direct: ?Match = null;
+                    while (x.max == null or n < x.max.?) {
+                        const checkpoint = if (authoring) self.observer.next_id else 0;
+                        const saved = self.failure();
+                        const maybe = try self.matchExpr(x.child, p, depth + 1);
+                        if (self.limit_message != null) break :blk null;
+                        const m = maybe orelse {
+                            if (authoring) self.observer.rollback(checkpoint);
+                            // A normal stop failed at the next item's start. Keep
+                            // deeper failures from incomplete repeated items, but
+                            // optional expressions still discard their probes.
+                            if (n >= x.min and (x.max != null or self.failed.offset <= p)) self.restoreFailure(saved);
+                            break;
+                        };
+                        if (m.pos == p and x.max == null) {
+                            self.limit_message = "zero-width repetition";
+                            break :blk null;
+                        }
+                        direct = m;
+                        if (m.structured) {
+                            structured = true;
+                            switch (m.value) {
+                                .array => |a| try items.appendSlice(a.items),
+                                else => try items.append(m.value),
+                            }
+                        }
+                        p = m.pos;
+                        n += 1;
+                    }
+                    if (n < x.min) break :blk null;
+                    if (x.max != null and x.max.? == 1 and direct != null) break :blk direct.?;
+                    break :blk Match{ .pos = p, .value = if (structured) .{ .array = items } else .{ .string = self.input[pos..p] }, .structured = structured };
+                },
+            };
+        }
+    };
+}
 
 pub fn parse(allocator: std.mem.Allocator, grammar: *const Grammar, input: []const u8, trace: bool) anyerror!ParseResult {
-    var runtime = Runtime{ .allocator = allocator, .grammar = grammar, .input = input, .trace_enabled = trace };
+    return if (trace) parseMode(true, allocator, grammar, input) else parseMode(false, allocator, grammar, input);
+}
+
+fn parseMode(comptime authoring: bool, allocator: std.mem.Allocator, grammar: *const Grammar, input: []const u8) anyerror!ParseResult {
+    var runtime = Runtime(authoring){ .allocator = allocator, .grammar = grammar, .input = input };
+    if (authoring) runtime.observer = Recorder.init(allocator);
     const matched = try runtime.matchRule(grammar.root, 0, 0);
-    const events = try runtime.traces.toOwnedSlice(allocator);
-    if (runtime.limit_message != null) return .{ .diagnostic = try runtime.diagnostic(), .trace = events };
-    if (matched) |m| {
-        if (m.pos == input.len) return .{ .value = m.value, .trace = events };
-        runtime.failed = .{
-            .offset = m.pos,
-            .expected = try allocator.dupe(common.Expectation, &.{.{
-                .message = "expected end of input",
-                .grammar_offset = grammar.rules[grammar.root].offset,
-                .rule = grammar.rules[grammar.root].name,
-            }}),
-        };
-        return .{ .diagnostic = try runtime.diagnostic(), .trace = events };
+    var result: ParseResult = .{};
+    var synthetic_eof = false;
+    if (runtime.limit_message != null) {
+        result.diagnostic = try runtime.diagnostic();
+    } else if (matched) |m| {
+        if (m.pos == input.len) {
+            result.value = m.value;
+        } else {
+            synthetic_eof = true;
+            runtime.failed = .{
+                .offset = m.pos,
+                .expected = try allocator.dupe(common.Expectation, &.{.{
+                    .message = "expected end of input",
+                    .grammar_offset = grammar.rules[grammar.root].offset,
+                    .grammar_end = grammar.rules[grammar.root].end,
+                    .attempt_id = if (authoring) 0 else null,
+                    .rule = grammar.rules[grammar.root].name,
+                }}),
+            };
+            result.diagnostic = try runtime.diagnostic();
+        }
+    } else {
+        result.diagnostic = try runtime.diagnostic();
     }
-    return .{ .diagnostic = try runtime.diagnostic(), .trace = events };
+    if (authoring) {
+        const failure: ?common.FailureSite = if (result.diagnostic) |d| .{
+            .offset = d.offset,
+            .rule = d.rule,
+            .attempt_id = if (d.expected.len > 0) d.expected[0].attempt_id else null,
+            .grammar_offset = d.grammar_offset,
+            .grammar_end = d.grammar_end,
+            .synthetic_eof = synthetic_eof,
+        } else null;
+        result.summary = runtime.observer.finish(failure);
+        result.trace = try runtime.observer.events.toOwnedSlice(allocator);
+    }
+    return result;
 }

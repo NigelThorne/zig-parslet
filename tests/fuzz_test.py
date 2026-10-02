@@ -157,6 +157,21 @@ class FuzzTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0 if expected else 1, result.stderr)
                     if expected:
                         self.assertEqual(json.loads(result.stdout), text)
+                    # The instrumented mode must agree with the production matcher.
+                    author = subprocess.run([str(BIN / "peg_test"), "--json", str(grammar), "-"],
+                                            input=text.encode(), capture_output=True, timeout=5)
+                    self.assertEqual(author.returncode, result.returncode, author.stderr)
+                    report = strict_json(author.stdout)
+                    if expected:
+                        self.assertEqual(report["value"], text)
+                    else:
+                        plain = subprocess.run([str(BIN / "peg_parse"), "--json", str(grammar), "-"],
+                                               input=text.encode(), capture_output=True, timeout=5)
+                        self.assertEqual(plain.returncode, result.returncode, plain.stderr)
+                        error = strict_json(plain.stdout)["error"]
+                        self.assertEqual(error["offset"], report["error"]["offset"])
+                        self.assertEqual(error["message"], report["error"]["message"])
+                        self.assertEqual(error["kind"], report["error"]["kind"])
 
     def test_mutated_grammar_definitions_do_not_crash(self):
         rng = random.Random(SEED + 1)

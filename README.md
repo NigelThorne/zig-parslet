@@ -207,7 +207,7 @@ eols <- ([\r\n][ ]*)+
 @test(subject) "rejects digits" { input: "123" reject: true }
 ```
 
-Plain `@test "name"` still starts at the document root. `@test(rule)` starts at that rule and still requires the entire test input to match. Rules may be defined after their tests. An unknown test rule is a definition error when running embedded tests. The root declaration is still required. Human reports show `[rule]` for explicitly selected rules; JSON test reports include the effective `rule` for every test.
+Plain `@test "name"` still starts at the document root. `@test(rule)` starts at that rule and still requires the entire test input to match. Rules may be defined after their tests. An unknown test rule is a definition error when running embedded tests. The root declaration is still required. Human reports show `[rule]` for explicitly selected rules. JSON test reports include top-level `root_rule`; every case includes effective `rule`, `assertion` (`expect` or `reject`), `is_root` (whether its effective rule is the document root), `summary` and `trace`.
 
 `expect` compares the whole capture tree, ignoring object key order. A `reject` test passes only for a document mismatch, not for a parser resource limit or broken grammar.
 
@@ -263,7 +263,7 @@ Transform strings use JSON escapes, including Unicode escapes. Numeric literals 
 
 `peg_parse` reports the document failure location and expected alternatives. For example, `"yes" / "no"` reports `expected literal "yes" or literal "no"`. Tied failures retain up to 16 distinct expectations; repeated expectations appear once, and truncation is reported. Failures from successful choices and optional/lookahead probes do not leak into later errors. Repetition ignores normal termination at the next item's start, but retains deeper failures from incomplete items, such as an unfinished quoted CSV field.
 
-`peg_test` also highlights the grammar expressions for those alternatives and shows a bounded trace of rule attempts. A successful attempt can later be discarded by backtracking; the trace is not a list of committed matches.
+`peg_test` also highlights grammar expressions and shows attempt IDs, parents, deepest progress, disposition and a summary. `peg_test --json` includes `summary` and `trace` on document success and failure, and per embedded test. An event records a local rule attempt, not necessarily a committed match. Its `end` is the returned input position (the starting position on failure), while `furthest` tracks deeper progress. `disposition` distinguishes retained, backtracked and lookahead attempts. Diagnostic expectations identify grammar spans and attempt IDs where available. A prefix match can succeed locally but fail whole-document parsing at a synthetic EOF site. Summary `furthest_attempt` and `last_success` include attempts omitted by the bounded trace. The trace records the first 1,024 completed attempts; counts and `trace_truncated` expose omissions. This reporting observes the existing parse, without a second parsing algorithm. `peg_parse` still returns only the capture tree on success.
 
 Locations use zero-based byte offsets in JSON and one-based line/byte columns in human output. Highlights escape control and non-ASCII bytes so terminal controls cannot run and carets remain aligned with byte positions.
 
@@ -278,6 +278,7 @@ mise exec -- zig fmt --check build.zig src
 mise exec -- zig build test
 mise exec -- zig build
 python3 tests/cli_test.py
+python3 tests/authoring_test.py
 python3 tests/fuzz_test.py
 ```
 
@@ -287,7 +288,7 @@ The Python standard-library tests exercise the real executables, including stdin
 
 `tests/fuzz_test.py` runs bounded randomized checks against the built executables. It uses only Python's standard library. Each subprocess has a five-second timeout; failure reports include the seed, case and payload.
 
-- Compare generated PEG operator combinations with an independent recognition model, across all a/b strings through length two, an outsider byte, and a longer random input.
+- Compare generated PEG operator combinations with an independent recognition model, across all a/b strings through length two, an outsider byte, and a longer random input. Compare production and authoring modes on the same inputs, including final errors.
 - Mutate grammar and transform definitions, checking exit codes, JSON output and diagnostic escaping. Grammar mutations also exercise embedded-test loading.
 - Compare mutated JSON acceptance and values with Python's JSON decoder, enforcing this project's strict Unicode-scalar policy and excluding non-JSON constants.
 - Check successful mutated XML pipelines against ElementTree. Unsupported XML features may be rejected; a transform rejection after structural parsing must also be invalid XML.
@@ -333,4 +334,4 @@ Do not move published tags. A failed build creates no release. If publication it
 
 ## Library
 
-`src/root.zig` exports `engine`, `transform`, `Diagnostic`, `Expectation` and `TraceEvent`. APIs accept an allocator; use an arena for each operation and keep source/input buffers alive while using the results. See [SPEC.md](SPEC.md) for interfaces and syntax details.
+`src/root.zig` exports `engine`, `transform`, `Diagnostic`, `Expectation`, `TraceEvent`, `TraceSummary` and `FailureSite`. APIs accept an allocator; use an arena for each operation and keep source/input buffers alive while using the results. See [SPEC.md](SPEC.md) for interfaces and syntax details.

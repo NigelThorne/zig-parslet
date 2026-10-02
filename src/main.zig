@@ -13,6 +13,7 @@ const Context = struct {
     io: std.Io,
     json: bool = false,
     events: []const common.TraceEvent = &.{},
+    summary: ?common.TraceSummary = null,
 
     fn emit(self: Context, text: []const u8, stderr: bool) !void {
         const file: std.Io.File = if (stderr) .stderr() else .stdout();
@@ -64,9 +65,10 @@ const Context = struct {
                 .rule = problem_value.rule,
                 .grammar_source = if (grammar_loc != null) grammar_name else null,
                 .grammar_location = grammar_loc,
+                .grammar_end = problem_value.grammar_end,
                 .expected = problem_value.expected,
                 .expected_truncated = problem_value.expected_truncated,
-            }, .trace = if (author) self.events else &.{} });
+            }, .trace = if (author) self.events else &.{}, .summary = if (author) self.summary else null });
             return;
         }
         var output: std.Io.Writer.Allocating = .init(self.allocator);
@@ -74,6 +76,7 @@ const Context = struct {
         try output.writer.writeAll(try diag.highlight(self.allocator, source_name, source, problem_value.offset));
         if (problem_value.rule) |rule| try output.writer.print("rule: {s}\n", .{try diag.escape(self.allocator, rule)});
         if (author) {
+            try self.showSummary(&output.writer);
             if (problem_value.grammar_offset) |offset| {
                 try output.writer.writeAll("grammar expression:\n");
                 try output.writer.writeAll(try diag.highlight(self.allocator, grammar_name, grammar_source, offset));
@@ -87,17 +90,25 @@ const Context = struct {
         try self.emit(output.written(), !is_test);
     }
 
+    fn showSummary(self: Context, writer: *std.Io.Writer) !void {
+        const summary = self.summary orelse return;
+        try writer.print("Attempts: {d} total, {d} recorded, {d} omitted\n", .{ summary.total_attempts, summary.recorded_attempts, summary.omitted_attempts });
+        if (summary.furthest_attempt) |event| try writer.print("Furthest: #{d} {s} at byte {d}\n", .{ event.id, try diag.escape(self.allocator, event.rule), event.furthest });
+        if (summary.last_success) |event| try writer.print("Last local match: #{d} {s} ({s})\n", .{ event.id, try diag.escape(self.allocator, event.rule), @tagName(event.disposition) });
+        if (summary.final_failure) |site| try writer.print("Final failure: byte {d}{s}\n", .{ site.offset, if (site.synthetic_eof) " (end of input required)" else "" });
+        if (summary.trace_truncated) try writer.writeAll("Trace truncated: some attempts are not recorded.\n");
+    }
+
     fn trace(self: Context, events: []const common.TraceEvent) !void {
         if (events.len == 0) return;
         var output: std.Io.Writer.Allocating = .init(self.allocator);
         try output.writer.writeAll("Rule attempts (matches may later be backtracked; last 40 recorded):\n");
         for (events[events.len -| 40..]) |event| {
             try output.writer.splatByteAll(' ', @as(usize, @min(event.depth, 12)) * 2);
-            try output.writer.print("{s} {s} bytes {d}..{d}\n", .{
-                if (event.matched) "MATCH" else "FAIL",
-                try diag.escape(self.allocator, event.rule),
-                event.start,
-                event.end,
+            try output.writer.print("#{d} parent={?d} {s} {s} bytes {d}..{d} furthest={d} {s}\n", .{
+                event.id,                                    event.parent_id,             if (event.outcome == .limit) "LIMIT" else if (event.matched) "MATCH" else "FAIL",
+                try diag.escape(self.allocator, event.rule), event.start,                 event.end,
+                event.furthest,                              @tagName(event.disposition),
             });
         }
         try self.emit(output.written(), false);
@@ -204,6 +215,7 @@ fn run(context: *Context, init: std.process.Init) !u8 {
     const input = context.read(input_name) catch |err| return context.ioProblem(input_name, err);
     const result = try engine.parse(context.allocator, &grammar, input, is_test);
     context.events = result.trace;
+    context.summary = result.summary;
     if (result.diagnostic) |d| {
         try context.diagnostic(d, if (std.mem.eql(u8, input_name, "-")) "<stdin>" else input_name, input, rules_name, rules_source, is_test);
         if (is_test and !context.json) try context.trace(result.trace);
@@ -211,10 +223,13 @@ fn run(context: *Context, init: std.process.Init) !u8 {
     }
     if (is_test) {
         if (context.json) {
-            try context.jsonValue(.{ .matched = true, .value = result.value.?, .trace = result.trace });
+            try context.jsonValue(.{ .matched = true, .value = result.value.?, .trace = result.trace, .summary = result.summary });
         } else {
             try context.emit(try std.fmt.allocPrint(context.allocator, "PASS: matched all {d} input bytes\n", .{input.len}), false);
             try context.jsonValue(result.value.?);
+            var output: std.Io.Writer.Allocating = .init(context.allocator);
+            try context.showSummary(&output.writer);
+            try context.emit(output.written(), false);
             try context.trace(result.trace);
         }
     } else try context.jsonValue(result.value.?);
@@ -241,6 +256,10 @@ fn transformCommand(context: Context, rules_name: []const u8, rules_source: []co
 const TestReport = struct {
     name: []const u8,
     rule: []const u8,
+    assertion: []const u8,
+    is_root: bool,
+    summary: ?common.TraceSummary,
+    trace: []const common.TraceEvent,
     passed: bool,
     message: []const u8,
     expected: ?std.json.Value,
@@ -269,6 +288,10 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
         try reports.append(context.allocator, .{
             .name = case.name,
             .rule = grammar.rules[test_grammar.root].name,
+            .assertion = if (case.reject) "reject" else "expect",
+            .is_root = test_grammar.root == grammar.root,
+            .summary = result.summary,
+            .trace = result.trace,
             .passed = ok,
             .message = message,
             .expected = case.expect,
@@ -276,6 +299,9 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
             .diagnostic = result.diagnostic,
         });
         if (!context.json) {
+            var test_context = context;
+            test_context.summary = result.summary;
+            test_context.events = result.trace;
             const label = if (case.rule_name) |name|
                 try std.fmt.allocPrint(context.allocator, "{s} [{s}]", .{ case.name, name })
             else
@@ -286,8 +312,8 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
             if (!ok) {
                 if (result.diagnostic) |d| {
                     const source_name = try std.fmt.allocPrint(context.allocator, "test '{s}' input", .{case.name});
-                    try context.diagnostic(d, source_name, case.input, grammar_name, grammar_source, true);
-                    try context.trace(result.trace);
+                    try test_context.diagnostic(d, source_name, case.input, grammar_name, grammar_source, true);
+                    try test_context.trace(result.trace);
                 } else {
                     if (case.expect) |expected| {
                         try context.emit("  expected: ", false);
@@ -297,13 +323,22 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
                         try context.emit("  actual:   ", false);
                         try context.jsonValue(actual);
                     }
+                    var output: std.Io.Writer.Allocating = .init(context.allocator);
+                    try test_context.showSummary(&output.writer);
+                    try context.emit(output.written(), false);
+                    try test_context.trace(result.trace);
                 }
+            }
+            if (ok) {
+                var output: std.Io.Writer.Allocating = .init(context.allocator);
+                try test_context.showSummary(&output.writer);
+                try context.emit(output.written(), false);
             }
         }
     }
     const failed = grammar.tests.len - passed;
     if (context.json) {
-        try context.jsonValue(.{ .passed = passed, .failed = failed, .tests = reports.items });
+        try context.jsonValue(.{ .root_rule = grammar.rules[grammar.root].name, .passed = passed, .failed = failed, .tests = reports.items });
     } else if (grammar.tests.len == 0) {
         try context.emit("No embedded tests. Add @test cases to this .peg file.\n", false);
     } else {
