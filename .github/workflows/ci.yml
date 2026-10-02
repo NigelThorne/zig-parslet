@@ -51,5 +51,7 @@ jobs:
           mise exec -- zig build -Doptimize="$OPTIMIZE"
       - name: Run CLI acceptance tests
         run: python3 tests/cli_test.py
+      - name: Run authoring diagnostics tests
+        run: python3 tests/authoring_test.py
       - name: Run deterministic fuzz tests
         run: python3 tests/fuzz_test.py

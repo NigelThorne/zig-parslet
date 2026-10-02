@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(b.addExecutable(.{ .name = name, .root_module = module }));
     }
     const test_step = b.step("test", "Run library unit tests");
-    inline for (.{ "src/engine_test.zig", "src/transform_test.zig", "src/diagnostics_test.zig" }) |path| {
+    inline for (.{ "src/engine_test.zig", "src/engine_trace_test.zig", "src/transform_test.zig", "src/diagnostics_test.zig" }) |path| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,

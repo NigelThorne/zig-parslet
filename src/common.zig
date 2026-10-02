@@ -4,6 +4,7 @@ pub const Diagnostic = struct {
     offset: usize,
     message: []const u8,
     grammar_offset: ?usize = null,
+    grammar_end: ?usize = null,
     rule: ?[]const u8 = null,
     expected: []const Expectation = &.{},
     expected_truncated: bool = false,
@@ -15,6 +16,8 @@ pub const Diagnostic = struct {
 pub const Expectation = struct {
     message: []const u8,
     grammar_offset: usize,
+    grammar_end: ?usize = null,
+    attempt_id: ?usize = null,
     rule: ?[]const u8 = null,
 };
 
@@ -25,4 +28,32 @@ pub const TraceEvent = struct {
     end: usize,
     matched: bool,
     depth: usize,
+    id: usize = 0,
+    parent_id: ?usize = null,
+    grammar_offset: usize = 0,
+    grammar_end: usize = 0,
+    furthest: usize = 0,
+    outcome: enum { matched, failed, limit } = .failed,
+    disposition: enum { retained, backtracked, lookahead } = .retained,
+    lookahead: bool = false,
+    backtracked: bool = false,
+};
+
+pub const FailureSite = struct {
+    offset: usize,
+    rule: ?[]const u8 = null,
+    attempt_id: ?usize = null,
+    grammar_offset: ?usize = null,
+    grammar_end: ?usize = null,
+    synthetic_eof: bool = false,
+};
+
+pub const TraceSummary = struct {
+    total_attempts: usize = 0,
+    recorded_attempts: usize = 0,
+    omitted_attempts: usize = 0,
+    trace_truncated: bool = false,
+    furthest_attempt: ?TraceEvent = null,
+    last_success: ?TraceEvent = null,
+    final_failure: ?FailureSite = null,
 };
