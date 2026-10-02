@@ -8,6 +8,8 @@ pub const TestCase = struct {
     expect: ?std.json.Value = null,
     reject: bool = false,
     source_offset: usize,
+    rule_name: ?[]const u8 = null,
+    rule_index: ?usize = null,
 };
 
 const ClassRange = struct { first: u8, last: u8 };
@@ -396,6 +398,16 @@ const GrammarParser = struct {
         const at = self.pos;
         self.pos += "@test".len;
         self.skipSpace();
+        var rule_name: ?[]const u8 = null;
+        if (!self.eof() and self.peek() == '(') {
+            self.pos += 1;
+            self.skipSpace();
+            rule_name = self.identifier() orelse return self.fail(self.pos, "expected test rule name");
+            self.skipSpace();
+            if (self.eof() or self.peek() != ')') return self.fail(self.pos, "expected ')' after test rule name");
+            self.pos += 1;
+            self.skipSpace();
+        }
         if (self.eof() or (self.peek() != '"' and self.peek() != '\'')) return self.fail(self.pos, "expected test name");
         const name = try self.parseString();
         self.skipSpace();
@@ -444,7 +456,7 @@ const GrammarParser = struct {
             if (!self.eof() and self.peek() == ',') self.pos += 1;
         }
         if (input == null or (has_expect == has_reject)) return self.fail(at, "test requires input and exactly one expect or reject: true");
-        try self.tests.append(self.allocator, .{ .name = name, .input = input.?, .expect = expect, .reject = reject, .source_offset = at });
+        try self.tests.append(self.allocator, .{ .name = name, .input = input.?, .expect = expect, .reject = reject, .source_offset = at, .rule_name = rule_name });
     }
 
     fn parseAll(self: *GrammarParser) !Grammar {
@@ -477,6 +489,17 @@ const GrammarParser = struct {
         }
         if (root == null) return self.fail(self.root_offset, "root references unknown rule");
         for (self.rules.items) |r| try self.validateRefs(r.expr);
+        for (self.tests.items) |*case| {
+            if (case.rule_name) |name| {
+                for (self.rules.items, 0..) |r, i| {
+                    if (std.mem.eql(u8, r.name, name)) {
+                        case.rule_index = i;
+                        break;
+                    }
+                }
+                if (case.rule_index == null) return self.fail(case.source_offset, "test references unknown rule");
+            }
+        }
         return .{ .tests = try self.tests.toOwnedSlice(self.allocator), .rules = try self.rules.toOwnedSlice(self.allocator), .root = root.? };
     }
 

@@ -86,6 +86,49 @@ test "captures aggregate across sequences and repetitions" {
     try expectJsonEqual("{\"username\":[{\"word\":\"first\"},{\"dot\":\".\",\"word\":\"last\"}],\"host\":\"example\"}", result.value.?);
 }
 
+test "named tests resolve forward rules without changing the root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source =
+        \\root document
+        \\@test(subject) "subject" { input: "Hello" expect: { subject: "Hello" } }
+        \\document <- "Subject: " subject
+        \\subject <- subject:[A-Za-z]+
+        \\@test "document" { input: "Subject: Hello" expect: { subject: "Hello" } }
+    ;
+    const grammar = try compileOk(a, source, true);
+    try std.testing.expectEqual(@as(usize, 0), grammar.root);
+    try std.testing.expectEqualStrings("subject", grammar.tests[0].rule_name.?);
+    try std.testing.expectEqual(@as(?usize, 1), grammar.tests[0].rule_index);
+    try std.testing.expect(grammar.tests[1].rule_name == null);
+    try std.testing.expect(grammar.tests[1].rule_index == null);
+    var selected = grammar;
+    selected.root = grammar.tests[0].rule_index.?;
+    const parsed = try engine.parse(a, &selected, "Hello", true);
+    try expectJsonEqual("{\"subject\":\"Hello\"}", parsed.value.?);
+    try std.testing.expect((try engine.parse(a, &grammar, "Hello", false)).diagnostic != null);
+    const skipped = try compileOk(a, source, false);
+    try std.testing.expectEqual(@as(usize, 0), skipped.tests.len);
+}
+
+test "unknown test rule fails only when tests are loaded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source =
+        \\root document
+        \\document <- "ok"
+        \\@test(missing) "bad" { input: "ok" expect: "ok" }
+    ;
+    var diagnostic: ?@import("common.zig").Diagnostic = null;
+    try std.testing.expectError(error.InvalidGrammar, engine.compile(a, source, true, &diagnostic));
+    try std.testing.expectEqualStrings("test references unknown rule", diagnostic.?.message);
+    try std.testing.expectEqual(std.mem.indexOf(u8, source, "@test").?, diagnostic.?.offset);
+    const skipped = try compileOk(a, source, false);
+    try std.testing.expectEqual(@as(usize, 0), skipped.tests.len);
+}
+
 test "embedded relaxed-json tests load or skip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

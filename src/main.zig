@@ -119,7 +119,7 @@ const help = if (is_transform)
 else if (is_test)
     \\peg_test - test and diagnose PEG grammars
     \\Usage: peg_test [--json] GRAMMAR.peg [INPUT|-]
-    \\  Without INPUT, run embedded @test cases.
+    \\  Without INPUT, run embedded @test cases; @test(rule) selects a named rule.
     \\  With INPUT, show document/grammar locations and rule attempts.
     \\  --json     Write a machine-readable test report or diagnostic.
     \\  --help     Show this help.
@@ -240,6 +240,7 @@ fn transformCommand(context: Context, rules_name: []const u8, rules_source: []co
 
 const TestReport = struct {
     name: []const u8,
+    rule: []const u8,
     passed: bool,
     message: []const u8,
     expected: ?std.json.Value,
@@ -251,7 +252,9 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
     var reports: std.ArrayList(TestReport) = .empty;
     var passed: usize = 0;
     for (grammar.tests) |case| {
-        const result = try engine.parse(context.allocator, grammar, case.input, true);
+        var test_grammar = grammar.*;
+        test_grammar.root = case.rule_index orelse grammar.root;
+        const result = try engine.parse(context.allocator, &test_grammar, case.input, true);
         const ok = if (case.reject)
             result.diagnostic != null and result.diagnostic.?.kind == .input
         else
@@ -265,6 +268,7 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
         if (ok) passed += 1;
         try reports.append(context.allocator, .{
             .name = case.name,
+            .rule = grammar.rules[test_grammar.root].name,
             .passed = ok,
             .message = message,
             .expected = case.expect,
@@ -272,8 +276,12 @@ fn embeddedTests(context: Context, grammar: *const engine.Grammar, grammar_name:
             .diagnostic = result.diagnostic,
         });
         if (!context.json) {
+            const label = if (case.rule_name) |name|
+                try std.fmt.allocPrint(context.allocator, "{s} [{s}]", .{ case.name, name })
+            else
+                case.name;
             try context.emit(try std.fmt.allocPrint(context.allocator, "{s} {s}: {s}\n", .{
-                if (ok) "PASS" else "FAIL", try diag.escape(context.allocator, case.name), message,
+                if (ok) "PASS" else "FAIL", try diag.escape(context.allocator, label), message,
             }), false);
             if (!ok) {
                 if (result.diagnostic) |d| {

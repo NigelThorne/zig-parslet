@@ -161,7 +161,8 @@ class FuzzTests(unittest.TestCase):
     def test_mutated_grammar_definitions_do_not_crash(self):
         rng = random.Random(SEED + 1)
         seeds = [b'root s\ns <- value:[a-z]+\n', b'root s\ns <- ("a" / "ab")* !.\n',
-                 b'root s\ns <- "a"\n@test "a" { input: "a" expect: "a" }\n']
+                 b'root s\ns <- "a"\n@test "a" { input: "a" expect: "a" }\n',
+                 b'root s\ns <- "a"\npart <- [a-z]+\n@test(part) "part" { input: "abc" expect: "abc" }\n']
         for case in range(CASES):
             source = mutate(rng, rng.choice(seeds))
             with self.subTest(seed=SEED, case=case, source=source):
