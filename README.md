@@ -191,9 +191,27 @@ peg_test greeting.peg
 
 Test values use JSON-style data with bare object keys and optional commas. Numeric literals must follow JSON number syntax, so `01`, `1.` and `1.e2` are errors. Use `\n` for newlines inside an input string. Each test requires `input` and exactly one of `expect` or `reject: true`.
 
+To test a helper rule without matching the whole document, put its name in parentheses:
+
+```peg
+root document
+document <- "Subject: " subject
+subject <- subject:[A-Za-z]+
+eols <- ([\r\n][ ]*)+
+
+@test(subject) "plain subject" {
+  input: "Hello"
+  expect: { subject: "Hello" }
+}
+@test(eols) "newline and spaces" { input: "\n  " expect: "\n  " }
+@test(subject) "rejects digits" { input: "123" reject: true }
+```
+
+Plain `@test "name"` still starts at the document root. `@test(rule)` starts at that rule and still requires the entire test input to match. Rules may be defined after their tests. An unknown test rule is a definition error when running embedded tests. The root declaration is still required. Human reports show `[rule]` for explicitly selected rules; JSON test reports include the effective `rule` for every test.
+
 `expect` compares the whole capture tree, ignoring object key order. A `reject` test passes only for a document mismatch, not for a parser resource limit or broken grammar.
 
-`peg_parse` skips balanced `@test` blocks. Unfinished assertions inside a balanced block do not affect production parsing. An unterminated block remains a grammar syntax error because its end cannot be located.
+`peg_parse` skips balanced `@test` blocks, including `@test(rule)` blocks without resolving their target rule. Unfinished assertions inside a balanced block do not affect production parsing. An unterminated block remains a grammar syntax error because its end cannot be located.
 
 ## Transform a tree
 

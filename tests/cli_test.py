@@ -108,6 +108,81 @@ class CliTests(unittest.TestCase):
         self.assertIn("missing name", result.stdout)
         self.assertIn("2 passed", result.stdout)
 
+    def test_named_rule_tests_and_root_tests_can_mix(self):
+        grammar = self.file("rules.peg", '''root document
+@test(subject) "before definition" { input: "Hello" expect: { subject: "Hello" } }
+document <- "Subject: " subject
+subject <- subject:[A-Za-z]+
+eols <- ([\\r\\n][ ]*)+
+@test "root" { input: "Subject: Hello" expect: { subject: "Hello" } }
+@test ( eols ) "line breaks" { input: "\\n  \\n" expect: "\\n  \\n" }
+@test(subject) "reject digits" { input: "123" reject: true }
+@test(subject) "reject trailing input" { input: "Hello!" reject: true }
+''')
+        result = self.run_cli("peg_test", grammar, "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["passed"], 5)
+        self.assertEqual([t["rule"] for t in report["tests"]],
+                         ["subject", "document", "eols", "subject", "subject"])
+        result = self.run_cli("peg_test", grammar)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("before definition [subject]", result.stdout)
+        # Test entry rules do not change the document root.
+        self.assertEqual(self.run_cli("peg_parse", grammar, data="Hello").returncode, 1)
+        self.assertEqual(self.run_cli("peg_parse", grammar, data="Subject: Hello").returncode, 0)
+
+    def test_named_rule_failure_uses_selected_rule_diagnostics(self):
+        grammar = self.file("rules.peg", '''root document
+document <- "whole document"
+subject <- [a-z]+
+@test(subject) "trailing" { input: "abc!" expect: "abc" }
+''')
+        result = self.run_cli("peg_test", grammar, "--json")
+        self.assertEqual(result.returncode, 1)
+        diagnostic = json.loads(result.stdout)["tests"][0]["diagnostic"]
+        self.assertEqual(diagnostic["offset"], 3)
+        self.assertEqual(diagnostic["expected"][0]["rule"], "subject")
+        result = self.run_cli("peg_test", grammar)
+        self.assertIn("trailing [subject]", result.stdout)
+        self.assertIn("subject", result.stdout)
+
+    def test_unknown_test_rule_is_only_validated_when_loading_tests(self):
+        grammar = self.file("unknown.peg", '''root document
+document <- "ok"
+@test(missing) "later" { unfinished assertions }
+''')
+        result = self.run_cli("peg_parse", grammar, data="ok")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grammar = self.file("unknown.peg", '''root document
+document <- "ok"
+@test(missing) "later" { input: "ok" expect: "ok" }
+''')
+        result = self.run_cli("peg_test", grammar)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("test references unknown rule", result.stdout + result.stderr)
+
+    def test_malformed_test_rule_selectors_are_definition_errors(self):
+        for selector in ["()", "(subject", '("subject")', "(subject, other)"]:
+            with self.subTest(selector=selector):
+                grammar = self.file("bad.peg", 'root subject\nsubject <- "ok"\n@test' + selector +
+                                    ' "test" { input: "ok" expect: "ok" }\n')
+                for command in ("peg_test", "peg_parse"):
+                    result = self.run_cli(command, grammar, data="ok")
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
+    def test_named_rejection_does_not_hide_resource_limits(self):
+        grammar = self.file("limit.peg", '''root document
+document <- "ok"
+loop <- loop
+@test(loop) "limit" { input: "" reject: true }
+''')
+        result = self.run_cli("peg_test", grammar, "--json")
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["tests"][0]["diagnostic"]["kind"], "limit")
+
     def test_embedded_test_structured_report(self):
         result = self.run_cli("peg_test", "--json", self.file("g.peg", GREETING))
         self.assertEqual(result.returncode, 0, result.stderr)

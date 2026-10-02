@@ -28,6 +28,8 @@ Expressions: string literals, character classes/ranges/inversion with `\xHH` byt
 
 Without captures, matching returns matched text. In sequences, captures discard uncaptured text; adjacent capture objects merge, with later duplicate keys winning. Repetitions with captured items produce arrays, including singleton arrays. A sequence combining capture objects and arrays flattens them into an array of structured items. Empty uncaptured matches produce an empty string. These are Parslet-inspired rules, not a promise of bug-for-bug Elixir/Ruby compatibility.
 
+`@test(rule_name) "label" { ... }` selects a rule as the test entry point. Plain `@test "label"` uses the root. Both require complete input consumption and retain existing capture/rejection semantics. Targets resolve after all rule declarations, allowing forward references. Unknown targets fail grammar loading only when tests are loaded; parse-only mode validates the optional selector syntax but skips its resolution and the balanced test body. A root declaration remains mandatory. Test execution does not mutate the grammar's document root. Human named-rule reports append `[rule]`; JSON reports add the effective `rule` field for all tests.
+
 Test blocks use relaxed JSON values, with bare object keys and optional commas. Numeric literals follow JSON number syntax, including fraction/exponent digits and no leading zeros. Each test requires a string input and exactly one `expect` tree or `reject: true`. peg_parse skips balanced test blocks without validating their contents. peg_test validates them and reports expected/actual mismatch or unexpected success. Unknown rules, duplicates and invalid roots are errors. Left recursion, zero-width repeat and excessive recursion/work must fail rather than hang.
 
 ## Transform
@@ -80,6 +82,8 @@ pub const TestCase = struct {
     expect: ?std.json.Value = null,
     reject: bool = false,
     source_offset: usize,
+    rule_name: ?[]const u8 = null,
+    rule_index: ?usize = null, // resolved named target; null selects grammar.root
 };
 pub const Grammar = struct {
     // additional implementation fields allowed
